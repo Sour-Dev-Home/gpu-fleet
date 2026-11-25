@@ -85,6 +85,13 @@ def test_a_missing_model_stops_the_worker_with_the_pull_command():
         make_smoke(model_server(ollama_404))(job, lambda: None)
 
 
+def test_a_404_quotes_what_the_server_said():
+    # A wrong FLEET_MODEL_URL also answers 404; the server's own words tell the two apart.
+    job = Job("j9", "a" * 64, "qwen3:14b", "smoke-v1")
+    with pytest.raises(SystemExit, match=r"model 'qwen3:14b' not found"):
+        make_smoke(model_server(ollama_404))(job, lambda: None)
+
+
 def test_a_missing_model_stores_and_completes_nothing():
     clock, store = FakeClock(), FakeStore()
     broker = FakeBroker([Lease(JOB, "t", 60, clock())], store, clock)

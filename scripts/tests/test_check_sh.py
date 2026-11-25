@@ -74,3 +74,20 @@ def test_files_the_user_staged_stay_staged(repo, tmp_path):
     (repo / "new.py").write_text("fine\n")
     run_check(repo, tmp_path)
     assert git(repo, "status", "--short") == "A  staged.py\n?? new.py\n"
+
+
+def test_a_file_name_that_looks_like_a_pattern_touches_only_itself(repo, tmp_path):
+    # git reads path arguments as patterns: "f[a].py" also matches "fa.py", so a pattern-reading
+    # undo would unstage the user's fa.py.
+    (repo / "fa.py").write_text("fine\n")
+    git(repo, "add", "fa.py")
+    (repo / "f[a].py").write_text("fine\n")
+    run_check(repo, tmp_path)
+    assert git(repo, "status", "--short") == "A  fa.py\n?? f[a].py\n"
+
+
+def test_no_untracked_files_leaves_the_index_alone(repo, tmp_path):
+    (repo / "staged.py").write_text("fine\n")
+    git(repo, "add", "staged.py")
+    run_check(repo, tmp_path)
+    assert git(repo, "status", "--short") == "A  staged.py\n"

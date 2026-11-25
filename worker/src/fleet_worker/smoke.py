@@ -64,11 +64,14 @@ def make_smoke(client: httpx.Client) -> Runner:
         parts: list[str] = []
         # Streamed newline-delimited JSON: one object per chunk, the last has "done": true.
         with client.stream("POST", "/api/generate", json=body) as r:
-            if r.status_code == 404:  # Ollama: "model '<name>' not found"
+            if r.status_code == 404:  # Ollama: {"error": "model '<name>' not found"}
+                # Quote the server's own words: a wrong FLEET_MODEL_URL also gives 404, and the
+                # body tells the two apart.
+                said = r.read().decode("utf-8", "replace").strip()[:200]
                 raise ModelNotFound(
                     f"fleet-worker: job {job.job_id} needs model {job.model!r}, which the model "
-                    f"server at {client.base_url} doesn't have; run `ollama pull {job.model}`. "
-                    "Stopping: nothing stored or completed."
+                    f"server at {client.base_url} doesn't have (it said: {said}); run "
+                    f"`ollama pull {job.model}`. Stopping: nothing stored or completed."
                 )
             r.raise_for_status()
             for line in r.iter_lines():
