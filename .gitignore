@@ -221,3 +221,32 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- fleet project ---
+.env
+.env.*
+*.pem
+*.key
+.private-patterns.txt
+# secrets: only sops-encrypted files may be committed
+secrets/*
+!secrets/*.enc.*
+!secrets/README.md
+# Terraform: state and variables hold secrets
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!example.tfvars
+crash.log
+override.tf
+*_override.tf
+# Kubernetes / cloud
+kubeconfig*
+.kube/
+# data: footage, frames, models, results never go in git
+data/
+out/
+models/
+*.mp4
+*.mkv
