@@ -6,29 +6,40 @@ on:
   merge_group:
 permissions:
   contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+# Actions are pinned to full commit SHAs (tags can be moved); Dependabot github-actions bumps them.
 jobs:
   checks:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
       - name: pre-commit (secrets, private info, lint, fmt)
-        run: pip install pre-commit && pre-commit run --all-files --show-diff-on-failure
+        run: pip install pre-commit==4.7.0 && pre-commit run --all-files --show-diff-on-failure
       - name: Terraform validate (each root with .tf files)
         run: |
           for d in $(find infra -name '*.tf' -printf '%h\n' | sort -u); do
             terraform -chdir="$d" init -backend=false -input=false && terraform -chdir="$d" validate
           done
       - name: Trivy config scan (Terraform, Dockerfiles, Kubernetes)
-        run: docker run --rm -v "$PWD:/src" aquasec/trivy:latest config --exit-code 1 --severity HIGH,CRITICAL /src
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.76.2
+          scan-type: config
+          scan-ref: .
+          exit-code: "1"
+          severity: HIGH,CRITICAL
       - name: hadolint
-        run: |
-          for f in $(git ls-files '*Dockerfile*'); do docker run --rm -i hadolint/hadolint < "$f"; done
+        if: hashFiles('**/*Dockerfile*') != ''
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          recursive: true
       - name: Python tests
         run: |
-          if [ -f pyproject.toml ]; then pip install uv && uv sync && uv run pytest -q; fi
+          if [ -f pyproject.toml ]; then pip install uv==0.13.10 && uv sync && uv run pytest -q; fi
