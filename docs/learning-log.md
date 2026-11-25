@@ -90,3 +90,38 @@ lockfile. Three pieces written by me:
 
 **Numbers:** cost $0. Worker 49 tests, broker 53, each suite under 4 s; 8 threads racing 8 claims never
 shared a job. Security pass 1: 0 exploitable today, 12 findings (6 fixed, the rest gated by phase).
+
+## Phase 2: containers and Compose (2026-11-25)
+
+**Built:** worker and broker images (`python:3.11-slim` pinned by digest, uv multi-stage, uid 10001, the model
+server outside the image), `compose.yaml` (broker on 127.0.0.1 only, tokens required), a background heartbeat,
+the `smoke` runner against Ollama on the GPU, `fleet-enqueue`, CI image builds, Dependabot digest-only bumps,
+and `scripts/fleet-demo.ps1` for timed runs. ADRs 0014 (with an amendment) and 0016.
+
+**Learned:**
+- Content addressing has one rule: everything that changes the bytes is in the key, or forced to agree with
+  it. Two bugs broke it: the smoke prompt used the job ID (not in the key), and the echo runner could store
+  fake text under smoke keys (cache poisoning). Runners now own their prompt version, and a mismatch stops
+  the worker.
+- Two good decisions can combine into a bad one: "restart crashed workers" plus "stop on misconfiguration"
+  made a crash loop that dead-lettered every mismatched job. Workers use `restart: "no"` until ADR 0015's
+  capability filter keeps such jobs from being leased at all.
+- The lease TTL is SQS's visibility timeout; dead letters after N attempts are SQS's `maxReceiveCount`.
+- Busy is retryable, broken is not: SQLite's BUSY becomes a 503 with `Retry-After`, LOCKED stays a 500.
+  AWS SDKs retry throttling with backoff and jitter the same way, and never retry a validation error.
+- Bound every number from a header: `float("inf")` crashed `time.sleep`.
+- Measure before trusting a diagnosis: timing the failures showed 5-7 s timeouts, not instant refusals, and an
+  end-to-end run found the bigger bug (a connection closed on another thread) that the store-level repro
+  could not show.
+- Image hygiene: non-root user, digest pins (exact bytes, not a movable tag), no 5 GB model in the image.
+
+**Surprises:**
+- FastAPI runs a sync `yield` dependency's setup and teardown on different pool threads.
+- Git reads path arguments as patterns: an untracked `f[a].py` unstaged a staged `fa.py`.
+- A PowerShell function returns everything it prints, so build logs landed in the summary table.
+- `pre-commit run --all-files` means all *tracked* files.
+
+**Numbers:** cost $0. Worker image 194 MB, broker 212 MB. Demo, 20 jobs each: echo x1 2.5 s, smoke x1 on the
+RX 9070 3.9 s, smoke x3 2.5 s (16-token jobs, so the run measures polling, not the GPU). Before the thread fix
+18 of 500 enqueues failed; after, 0 of 500. Stress repro: 3-9 lock errors per run in rollback mode, 0-1 in WAL.
+Tests: broker 82, worker 86, scripts 20. Checkpoint: 2 of 4 answered with help.
