@@ -11,15 +11,25 @@ import json
 from dataclasses import dataclass
 
 
-def result_key(input_sha256: str, model: str, prompt_version: str) -> str:
+def result_key(
+    input_sha256: str, model: str, prompt_version: str, context_sha256: str | None = None
+) -> str:
     """Return the content address (64 lowercase hex chars) for a job's result.
 
     input_sha256: hex SHA-256 of the job's input bytes (e.g. a clip or a transcript).
     model: model identifier, e.g. "qwen3-vl:8b".
     prompt_version: version label of the prompt template, e.g. "describe-v3".
+    context_sha256: hex SHA-256 of any other text the prompt includes (e.g. Metaphor's
+        story bible and earlier descriptions in pass 2), or None when there is none
+        (pass 1). Change the context and the key changes, so the cache can't serve a
+        description written for an older story (ADR 0012).
     """
-
-    data = json.dumps([input_sha256, model, prompt_version])
+    parts = [input_sha256, model, prompt_version]
+    if context_sha256 is not None:
+        # Appended only when present: a job without context keeps the exact key it had
+        # before this field existed, so results cached by earlier runs stay valid.
+        parts.append(context_sha256)
+    data = json.dumps(parts)
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 
@@ -31,10 +41,11 @@ class Job:
     input_sha256: str
     model: str
     prompt_version: str
+    context_sha256: str | None = None  # None: the result depends on the input alone
 
     @property
     def result_key(self) -> str:
-        return result_key(self.input_sha256, self.model, self.prompt_version)
+        return result_key(self.input_sha256, self.model, self.prompt_version, self.context_sha256)
 
 
 # Renew when 1/3 of the original TTL remains: room for a slow network or a busy GPU.

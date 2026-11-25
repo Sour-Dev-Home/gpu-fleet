@@ -64,7 +64,13 @@ class HttpBroker:
             return None
         r.raise_for_status()
         body = r.json()
-        job = Job(body["job_id"], body["input_sha256"], body["model"], body["prompt_version"])
+        job = Job(
+            body["job_id"],
+            body["input_sha256"],
+            body["model"],
+            body["prompt_version"],
+            body.get("context_sha256"),  # .get: brokers from before ADR 0012 omit it
+        )
         return Lease(job, body["lease_token"], body["ttl_seconds"], received_at=sent_at)
 
     def heartbeat(self, lease: Lease) -> Lease:

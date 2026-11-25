@@ -43,6 +43,7 @@ class NewJob(Strict):
     input_sha256: Sha256Hex
     model: Name
     prompt_version: Name
+    context_sha256: Sha256Hex | None = None  # pass 2: hash of the story context (ADR 0012)
 
 
 class LeaseOut(BaseModel):
@@ -50,6 +51,7 @@ class LeaseOut(BaseModel):
     input_sha256: str
     model: str
     prompt_version: str
+    context_sha256: str | None
     lease_token: str
     # a duration, never a deadline: workers time it on their own clock
     ttl_seconds: float
@@ -135,7 +137,7 @@ def create_app(
 
     @app.post("/jobs", status_code=201, dependencies=admin)
     def add_job(job: NewJob, s: Store) -> None:
-        s.add(job.job_id, job.input_sha256, job.model, job.prompt_version)
+        s.add(job.job_id, job.input_sha256, job.model, job.prompt_version, job.context_sha256)
 
     @app.post("/lease", response_model=LeaseOut, dependencies=worker)
     def lease(s: Store):
@@ -147,6 +149,7 @@ def create_app(
             input_sha256=claim.input_sha256,
             model=claim.model,
             prompt_version=claim.prompt_version,
+            context_sha256=claim.context_sha256,
             lease_token=claim.lease_token,
             ttl_seconds=ttl_seconds,
             attempts=claim.attempts,

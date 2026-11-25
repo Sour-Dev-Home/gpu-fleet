@@ -23,9 +23,16 @@ CREATE TABLE IF NOT EXISTS jobs (
     attempts         INTEGER NOT NULL DEFAULT 0,  -- how many times the job was leased
     lease_token      TEXT,                        -- set while leased
     lease_expires_at REAL,                        -- broker wall clock, set while leased
-    result_key       TEXT                         -- set when done
+    result_key       TEXT,                        -- set when done
+    context_sha256   TEXT                         -- NULL: no context (ADR 0012)
 );
 """
+
+# Columns added after the first release, as (name, SQL type). CREATE TABLE IF NOT EXISTS
+# skips a table that already exists, so an older database gets these with ALTER TABLE.
+# Expand only: add nullable columns, never rename or drop, so old rows and older
+# code keep working (Postgres: the same ALTER TABLE ... ADD COLUMN, no table rewrite).
+MIGRATIONS = [("context_sha256", "TEXT")]
 
 
 @dataclass(frozen=True)
@@ -39,6 +46,7 @@ class Claim:
     lease_token: str
     lease_expires_at: float
     attempts: int
+    context_sha256: str | None = None
 
 
 class JobStore:
@@ -51,16 +59,32 @@ class JobStore:
         self.db = sqlite3.connect(path, isolation_level=None, timeout=5.0)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        have = {row["name"] for row in self.db.execute("PRAGMA table_info(jobs)")}
+        for name, sql_type in MIGRATIONS:
+            if name not in have:
+                # name and type come from the constant above, never from input
+                self.db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {sql_type}")
 
     def close(self) -> None:
         self.db.close()
 
-    def add(self, job_id: str, input_sha256: str, model: str, prompt_version: str) -> None:
+    def add(
+        self,
+        job_id: str,
+        input_sha256: str,
+        model: str,
+        prompt_version: str,
+        context_sha256: str | None = None,
+    ) -> None:
         """Queue a job. Adding the same job_id again is a no-op (idempotent enqueue)."""
         self.db.execute(
-            "INSERT OR IGNORE INTO jobs (job_id, input_sha256, model, prompt_version)"
-            " VALUES (?, ?, ?, ?)",
-            (job_id, input_sha256, model, prompt_version),
+            "INSERT OR IGNORE INTO jobs"
+            " (job_id, input_sha256, model, prompt_version, context_sha256)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (job_id, input_sha256, model, prompt_version, context_sha256),
         )
 
     def get(self, job_id: str) -> sqlite3.Row | None:
@@ -87,7 +111,8 @@ class JobStore:
             " WHERE job_id = (SELECT job_id FROM jobs"
             "   WHERE state='queued' OR (state='leased' AND lease_expires_at <= ?)"
             "   ORDER BY rowid LIMIT 1)"
-            " RETURNING job_id, input_sha256, model, prompt_version, lease_token, lease_expires_at, attempts",
+            " RETURNING job_id, input_sha256, model, prompt_version, lease_token,"
+            "   lease_expires_at, attempts, context_sha256",
             (token, now + ttl_seconds, now),
         ).fetchone()
         if row is None:
