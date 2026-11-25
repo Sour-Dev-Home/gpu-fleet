@@ -34,3 +34,6 @@ Feed in the maintainer's Terraform and Ansible books when they share paths; foll
   agent in the foreground and fix what it finds.
 - Every behaviour change has a test that fails without it. Narrow tests first, the full suite last.
 - Conventional commit subjects; short PR bodies; auto-merge after CI passes.
+- Every decision about architecture, protocols, storage, security posture, cost or tooling gets an ADR in
+  `docs/adr/` (index in its README) in the same PR as the change. Mark it Proposed until the maintainer approves.
+  A changed decision gets a new ADR that supersedes the old one.
