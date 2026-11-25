@@ -15,7 +15,9 @@ The database defaults to data/broker.db (git-ignored). Set FLEET_DOCS=1 to serve
 """
 
 import hmac
+import logging
 import os
+import sqlite3
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -25,6 +27,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from .store import JobStore
+
+log = logging.getLogger("fleet_broker")
 
 MIN_TOKEN_LENGTH = 32  # e.g. secrets.token_urlsafe(32) gives 43 characters
 MAX_BODY_BYTES = 16 * 1024  # every request here is a few hundred bytes of JSON
@@ -93,6 +97,7 @@ def create_app(
     max_attempts: int = 3,
     clock: Callable[[], float] = time.time,
     docs: bool = False,
+    busy_timeout: float = 5.0,
 ) -> FastAPI:
     for name, token in (("worker", worker_token), ("admin", admin_token)):
         if not token.isascii():  # headers arrive latin-1 decoded: keep tokens plain ASCII
@@ -109,7 +114,25 @@ def create_app(
         redoc_url=None,
         openapi_url="/openapi.json" if docs else None,
     )
-    JobStore(db_path, max_attempts).close()  # create the schema once at startup
+    # Create the schema and switch to WAL once at startup.
+    JobStore(db_path, max_attempts, busy_timeout, wal=True).close()
+
+    @app.exception_handler(sqlite3.OperationalError)
+    async def busy(request: Request, exc: sqlite3.OperationalError) -> Response:
+        # Lock starvation is transient: tell the caller to retry (ADR 0016). Anything else
+        # (a missing table, a corrupt file) is a real fault and stays a 500.
+        # SQLITE_BUSY (5): another connection holds the lock, so waiting helps. SQLITE_LOCKED (6)
+        # is a conflict inside one connection, a bug that retrying can't fix. The primary code is
+        # the low byte (extended codes add flags above it). Without a code, match the BUSY text.
+        code = getattr(exc, "sqlite_errorcode", None)
+        if (
+            (code & 0xFF == sqlite3.SQLITE_BUSY)
+            if code is not None
+            else (str(exc) == "database is locked")
+        ):
+            log.warning("database busy on %s %s: %s", request.method, request.url.path, exc)
+            return Response(status_code=503, headers={"Retry-After": "1"})
+        raise exc
 
     @app.middleware("http")
     async def limit_body(request: Request, call_next):
@@ -124,9 +147,9 @@ def create_app(
         return await call_next(request)
 
     def store() -> Iterator[JobStore]:
-        # One SQLite connection per request: requests run on a thread pool, and a
-        # connection must not be shared across threads. Opening one costs well under 1 ms.
-        s = JobStore(db_path, max_attempts)
+        # One SQLite connection per request, never used by two threads at once (setup, endpoint
+        # and teardown may run on different pool threads, but in turn). Opening one costs < 1 ms.
+        s = JobStore(db_path, max_attempts, busy_timeout)
         try:
             yield s
         finally:

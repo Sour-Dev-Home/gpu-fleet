@@ -149,3 +149,56 @@ def test_healthz_needs_no_token_and_reveals_nothing(tmp_path):
     r = as_(None, tmp_path).get("/healthz")
     assert r.status_code == 204
     assert r.content == b""
+
+
+# --- SQLite busy handling (ADR 0016) ---
+
+
+def test_database_runs_in_wal_mode(tmp_path):
+    import sqlite3
+
+    app(tmp_path)
+    mode = sqlite3.connect(tmp_path / "broker.db").execute("PRAGMA journal_mode").fetchone()[0]
+    assert mode == "wal"
+
+
+def test_locked_database_is_503_with_retry_after(tmp_path, caplog):
+    import sqlite3
+
+    c = as_(ADMIN, tmp_path, busy_timeout=0.05)
+    holder = sqlite3.connect(tmp_path / "broker.db", isolation_level=None)
+    holder.execute("BEGIN EXCLUSIVE")
+    try:
+        r = c.post("/jobs", json=JOB)
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    assert r.status_code == 503
+    assert r.headers["retry-after"] == "1"
+    assert "locked" in caplog.text
+    assert c.post("/jobs", json=JOB).status_code == 201  # recovers once the lock is gone
+
+
+@pytest.mark.parametrize(
+    ("message", "code"),
+    [
+        ("no such table: jobs", 1),  # SQLITE_ERROR
+        # SQLITE_LOCKED: a conflict inside one connection, a bug; retrying can't fix it
+        ("database table is locked", 6),
+    ],
+)
+def test_other_operational_errors_stay_500(tmp_path, monkeypatch, message, code):
+    import sqlite3
+
+    from fleet_broker.store import JobStore
+
+    def boom(self, *a, **k):
+        e = sqlite3.OperationalError(message)
+        e.sqlite_errorcode = code
+        raise e
+
+    monkeypatch.setattr(JobStore, "add", boom)
+    c = TestClient(
+        app(tmp_path), headers={"Authorization": f"Bearer {ADMIN}"}, raise_server_exceptions=False
+    )
+    assert c.post("/jobs", json=JOB).status_code == 500
