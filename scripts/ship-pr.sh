@@ -38,16 +38,29 @@ if [ $hold -eq 0 ]; then
   done
 fi
 
-# Checks can take a few seconds to register after a push.
-for _ in $(seq 1 12); do
-  out=$(gh pr checks "$pr" 2>&1) || true
-  case "$out" in *"no checks reported"*) sleep 5 ;; *) break ;; esac
+# Wait on the checks' states, not on gh's exit code: gh also exits non-zero on transient
+# API errors ("GraphQL: Something went wrong"), and that must not read as "CI failed".
+# Buckets: pass, skipping, pending, fail, cancel. No checks yet = still registering.
+errors=0
+for _ in $(seq 1 80); do # about 20 minutes at 15 s
+  if ! buckets=$(gh pr checks "$pr" --json bucket --jq '[.[].bucket] | join(" ")' 2>/dev/null); then
+    errors=$((errors + 1))
+    [ $errors -lt 5 ] || { echo "PR #$pr: gh kept failing; check by hand" >&2; exit 1; }
+    sleep 15
+    continue
+  fi
+  errors=0
+  case " $buckets " in
+    *" fail "* | *" cancel "*)
+      gh pr checks "$pr" --json name,bucket,link --jq '.[] | select(.bucket != "pass") | "\(.bucket)\t\(.name)\t\(.link)"' >&2
+      echo "PR #$pr: CI FAILED" >&2
+      exit 1
+      ;;
+    "  " | *" pending "*) sleep 15 ;;
+    *) break ;; # every check passed or was skipped
+  esac
 done
-if ! gh pr checks "$pr" --watch --fail-fast --interval 15 >/dev/null; then
-  gh pr checks "$pr" | grep -v pass || true
-  echo "PR #$pr: CI FAILED" >&2
-  exit 1
-fi
+case " $buckets " in *" pending "* | "  ") echo "PR #$pr: CI still running; giving up" >&2; exit 1 ;; esac
 echo "PR #$pr: CI passed"
 
 if [ $hold -eq 1 ]; then
