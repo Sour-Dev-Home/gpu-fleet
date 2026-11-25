@@ -23,7 +23,9 @@ Feed in the maintainer's Terraform and Ansible books when they share paths; foll
 - Jobs are leased and idempotent; results are content-addressed (input hash + model + prompt version).
 - Worker ships as a pip package (notebooks, native Windows) and a Docker image (Cloud Run, Kubernetes, rented GPUs).
 - Kubernetes is a backend (kind locally, then GKE Autopilot + KEDA on backlog), not the control layer.
-- Copyrighted footage only goes to the maintainer's own backends; volunteers get text-only or open jobs.
+- Copyrighted footage only goes to the maintainer's own backends. Volunteers get `open` jobs only; `derived` text
+  (descriptions, the script table, the story bible) also stays on the maintainer's backends unless the
+  maintainer decides otherwise (2026-11-25; see GLOSSARY.md "Data class").
 - Local AMD GPU (RX 9070, ROCm): Ollama with `use_mmap=false` and an explicit `num_ctx`.
 
 ## Rules
