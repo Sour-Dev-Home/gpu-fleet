@@ -20,3 +20,10 @@ updates:
     cooldown: { default-days: 7 }
     groups:
       docker: { patterns: ["*"] }
+    ignore:
+      # Digest bumps only (ADR 0014 amendment): python stays on the 3.11 CI tests with,
+      - dependency-name: python
+        update-types: [version-update:semver-major, version-update:semver-minor]
+      # and uv stays on the version ci.yml pins (pip install uv==0.13.10); move both together.
+      - dependency-name: "*astral-sh/uv"
+        update-types: [version-update:semver-major, version-update:semver-minor, version-update:semver-patch]

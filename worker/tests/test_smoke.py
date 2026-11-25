@@ -6,8 +6,8 @@ from fleet_worker.cli import Config
 from fleet_worker.protocol import Job
 from fleet_worker.smoke import ModelServerUnavailable, check_model_server, make_smoke
 
-JOB = Job("j7", "a" * 64, "m", "v1")
-SAME_INPUT = Job("j8", "a" * 64, "m", "v1")  # another job, same input: same Result key
+JOB = Job("j7", "a" * 64, "qwen3:8b", "smoke-v1")
+SAME_INPUT = Job("j8", "a" * 64, "qwen3:8b", "smoke-v1")  # another job, same input: same Result key
 TOKEN = "test-worker-token-0123456789abcdefghij"  # a test value, not a secret
 ENV = {"FLEET_BROKER_URL": "http://127.0.0.1:8000", "FLEET_WORKER_TOKEN": TOKEN}
 
@@ -30,7 +30,7 @@ def test_smoke_joins_the_stream_and_heartbeats_per_chunk():
         return streamed("ok", " aaaaaaaa")
 
     beats = []
-    result = make_smoke(model_server(handler), "qwen3:8b")(JOB, lambda: beats.append(1))
+    result = make_smoke(model_server(handler))(JOB, lambda: beats.append(1))
     assert result == b"ok aaaaaaaa\n"
     assert len(beats) == 3  # one per chunk, including the final one
 
@@ -42,7 +42,7 @@ def test_smoke_sends_the_settings_the_amd_gpu_needs():
         sent.append(json.loads(request.content))
         return streamed("ok")
 
-    make_smoke(model_server(handler), "qwen3:8b")(JOB, lambda: None)
+    make_smoke(model_server(handler))(JOB, lambda: None)
     body = sent[0]
     assert body["model"] == "qwen3:8b"
     assert body["think"] is False
@@ -52,8 +52,27 @@ def test_smoke_sends_the_settings_the_amd_gpu_needs():
     assert "aaaaaaaa" in body["prompt"]
 
 
+def test_smoke_asks_for_the_jobs_model():
+    # The model is part of the Result key, so the result must come from that model,
+    # whatever FLEET_MODEL the worker was started with.
+    sent = []
+
+    def handler(request):
+        sent.append(json.loads(request.content))
+        return streamed("ok")
+
+    job = Job("j9", "a" * 64, "qwen3:14b", "smoke-v1")
+    make_smoke(model_server(handler))(job, lambda: None)
+    assert sent[0]["model"] == "qwen3:14b"
+
+
+def test_smoke_implements_smoke_v1_only():
+    smoke = make_smoke(model_server(lambda r: streamed("ok")))
+    assert getattr(smoke, "prompt_versions", None) == frozenset({"smoke-v1"})
+
+
 def test_a_model_server_error_is_not_swallowed():
-    smoke = make_smoke(model_server(lambda r: httpx.Response(500)), "qwen3:8b")
+    smoke = make_smoke(model_server(lambda r: httpx.Response(500)))
     with pytest.raises(httpx.HTTPStatusError):
         smoke(JOB, lambda: None)
 
@@ -91,7 +110,7 @@ def test_the_prompt_depends_only_on_what_the_result_key_covers():
         prompts.append(json.loads(request.content)["prompt"])
         return streamed("ok")
 
-    smoke = make_smoke(model_server(handler), "qwen3:8b")
+    smoke = make_smoke(model_server(handler))
     smoke(JOB, lambda: None)
     smoke(SAME_INPUT, lambda: None)
     assert JOB.result_key == SAME_INPUT.result_key

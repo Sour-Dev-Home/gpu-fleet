@@ -54,6 +54,7 @@ def fleet(tmp_path):
 
     def worker(runner) -> Worker:
         # TestClient's base URL is http://testserver, an in-process app with no network
+        runner.prompt_versions = frozenset({"v1"})  # the version add() gives every job
         return Worker(HttpBroker(http, clock=clock, allow_http=True), store, runner, clock)
 
     def row(job_id: str):
@@ -140,6 +141,7 @@ def test_context_reaches_the_worker_and_keys_its_result(tmp_path):
         seen.append(job.context_sha256)
         return b"description"
 
+    runner.prompt_versions = frozenset({"v1"})
     Worker(HttpBroker(http, clock=clock, allow_http=True), store, runner, clock).run_once()
     assert seen == [ctx]
     assert list(store.data) == [result_key("a" * 64, "m", "v1", ctx)]

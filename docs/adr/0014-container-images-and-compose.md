@@ -39,6 +39,23 @@ ROCm image needs native-Linux `/dev/kfd`, which WSL2 lacks.
   actionable message if the model server or model is missing.
 - **`GET /healthz`:** unauthenticated, 204, no body, for Compose, Cloud Run and Kubernetes probes.
 
+## Amendment (2026-11-25)
+Approved by the maintainer after the phase 2b-2 review.
+- **Runners own their prompt version.** Each runner declares the prompt versions it implements
+  (`prompt_versions`): `echo` only `echo-v1`, `smoke` only `smoke-v1`. A job for any other version stops the
+  worker with an error naming both, before the result store is checked; nothing is stored or completed and the
+  lease expires. A mismatch is misconfiguration, so it must be loud rather than burn attempts. Why: in the
+  first Compose run, echo and smoke wrote different bytes under one **Result key** (`c90e1bae…`), because the
+  key covers the prompt version, not the runner. `smoke` sends the job's model; `FLEET_MODEL` only names the
+  model the startup check expects. `fleet-enqueue --demo` takes `--prompt-version` (default `smoke-v1`) and
+  `--model`.
+- **The broker image installs with `uv sync --frozen`.** Its dev group references `../worker`, outside the
+  build context, and `--locked` must read it to check the lock. `--frozen` installs exactly what `uv.lock`
+  says; CI's `uv sync --locked` (scripts/check.sh) stays the freshness guard, and `uv lock --check` does it
+  locally before a build.
+- **Dependabot bumps digests only** for `python` (no minor or major: the image stays on the 3.11 CI tests)
+  and for the uv image (no version updates: ci.yml pins uv separately, so both move together by hand).
+
 ## Consequences
 - One small worker image serves every backend. Changing GPU vendor or model server never rebuilds it.
 - The local GPU stays on the path that's measured to work (native Ollama), not an unsupported one.

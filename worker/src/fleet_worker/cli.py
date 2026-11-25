@@ -5,7 +5,10 @@
   FLEET_RESULTS_DIR   where results are written (default: results)
   FLEET_RUNNER        which runner to use: echo (default, no GPU) or smoke (asks the model server)
   FLEET_MODEL_URL     model server base URL, for runners that use one (smoke)
-  FLEET_MODEL         model name on the model server (default: qwen3:8b)
+  FLEET_MODEL         the model the startup check expects on the model server (default: qwen3:8b);
+                      each job names the model it is run with
+  Each runner implements fixed prompt versions (echo: echo-v1, smoke: smoke-v1); a job with
+  another prompt_version stops the worker (misconfiguration, ADR 0014 amendment).
   FLEET_ALLOW_HTTP    1 to allow plain http to a non-loopback host, e.g. the broker's
                       service name on a private Docker network. Never on a public network.
 
@@ -35,11 +38,15 @@ def echo(job: Job, keepalive: Callable[[], None]) -> bytes:
     return f"echo {job.model} {job.prompt_version} {job.input_sha256}\n".encode()
 
 
+# Its own prompt version, so echo bytes never land under a smoke (or real) Result key.
+echo.prompt_versions = frozenset({"echo-v1"})
+
+
 def _smoke(config: "Config") -> Runner:
     # Generation can take a while on a busy GPU; the heartbeat thread covers the lease.
     client = httpx.Client(base_url=config.model_url, timeout=httpx.Timeout(10.0, read=300.0))
     check_model_server(client, config.model)
-    return make_smoke(client, config.model)
+    return make_smoke(client)
 
 
 # Each entry builds its runner from the config, so runners that need a model server get one.

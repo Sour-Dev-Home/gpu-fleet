@@ -12,8 +12,11 @@ from collections.abc import Callable
 
 import httpx
 
+from .loop import Runner
 from .protocol import Job
 
+# The one prompt this runner implements; jobs for any other version stop the worker.
+PROMPT_VERSION = "smoke-v1"
 # Settings the project requires for the local AMD GPU (CLAUDE.md): no mmap, explicit context.
 OPTIONS = {"temperature": 0, "seed": 0, "num_ctx": 2048, "num_predict": 16, "use_mmap": False}
 
@@ -23,7 +26,11 @@ class ModelServerUnavailable(SystemExit):
 
 
 def check_model_server(client: httpx.Client, model: str) -> None:
-    """Fail at startup, with a message a person can act on, instead of on every job."""
+    """Fail at startup, with a message a person can act on, instead of on every job.
+
+    model is FLEET_MODEL: the model this worker expects its jobs to name. Jobs choose their
+    own model; this only catches the common mistake (server down, model not pulled) early.
+    """
     try:
         tags = client.get("/api/tags").raise_for_status().json()
     except httpx.HTTPError as e:
@@ -37,10 +44,12 @@ def check_model_server(client: httpx.Client, model: str) -> None:
         )
 
 
-def make_smoke(client: httpx.Client, model: str) -> Callable[[Job, Callable[[], None]], bytes]:
+def make_smoke(client: httpx.Client) -> Runner:
     def smoke(job: Job, keepalive: Callable[[], None]) -> bytes:
         body = {
-            "model": model,
+            # The job's model, not FLEET_MODEL: the model is part of the Result key, so the
+            # result must come from the model the key names.
+            "model": job.model,
             "prompt": f"Reply with exactly these words and nothing else: ok {job.input_sha256[:8]}",
             "stream": True,
             "think": False,  # qwen3 would otherwise spend the tokens on hidden reasoning
@@ -60,4 +69,5 @@ def make_smoke(client: httpx.Client, model: str) -> Callable[[Job, Callable[[], 
                     break
         return ("".join(parts).strip() + "\n").encode()
 
+    smoke.prompt_versions = frozenset({PROMPT_VERSION})
     return smoke

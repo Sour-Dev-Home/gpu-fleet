@@ -30,6 +30,15 @@ class InvalidResult(Exception):
     retried and the failure counts toward the dead-letter limit (ADR 0006)."""
 
 
+class UnsupportedPromptVersion(SystemExit):
+    """A job asks for a prompt version this worker's runner doesn't implement.
+
+    That is misconfiguration (the wrong FLEET_RUNNER, or jobs enqueued for another runner), not
+    a bad job: the worker stops with this message instead of burning the job's attempts, and
+    stores and completes nothing. The lease simply expires (ADR 0014 amendment).
+    """
+
+
 def require_nonempty(job: Job, data: bytes) -> None:
     """The default validator. Real runners pass a stricter one (schema, IDs, lengths)."""
     if not isinstance(data, bytes) or not data.strip():
@@ -53,9 +62,18 @@ class ResultStore(Protocol):
     def put(self, key: str, data: bytes) -> None: ...
 
 
-# A runner does the actual work (a model call, a transcription). It calls keepalive()
-# between chunks of work so the worker can heartbeat; it returns the result bytes.
-Runner = Callable[[Job, Callable[[], None]], bytes]
+class Runner(Protocol):
+    """Does the actual work (a model call, a transcription) and returns the result bytes.
+
+    A plain function with a prompt_versions attribute: the prompt versions it implements.
+    The prompt version is part of the Result key, so only the runner that implements a
+    version may write results under it. keepalive() is optional (see Worker.keepalive).
+    """
+
+    prompt_versions: frozenset[str]
+
+    def __call__(self, job: Job, keepalive: Callable[[], None], /) -> bytes: ...
+
 
 Outcome = Literal["ran", "cached"]
 
@@ -70,6 +88,8 @@ class Worker:
         validate: Callable[[Job, bytes], None] = require_nonempty,
         heartbeat_poll_seconds: float = 1.0,
     ) -> None:
+        if not isinstance(getattr(runner, "prompt_versions", None), frozenset):
+            raise TypeError(f"runner {runner!r} must declare prompt_versions (a frozenset)")
         self.broker = broker
         self.store = store
         self.runner = runner
@@ -148,7 +168,16 @@ class Worker:
         Returns "cached" if the result already existed, "ran" if the runner produced it.
         """
         assert self.lease is not None
-        key = self.lease.job.result_key
+        job = self.lease.job
+        # Before the store: a misrouted job must not even reuse a result someone else wrote.
+        if job.prompt_version not in self.runner.prompt_versions:
+            name = getattr(self.runner, "__name__", repr(self.runner))
+            raise UnsupportedPromptVersion(
+                f"fleet-worker: job {job.job_id} has prompt_version {job.prompt_version!r}, but "
+                f"runner {name!r} implements {sorted(self.runner.prompt_versions)}. Stopping: "
+                "enqueue jobs for this runner or start the worker with the matching FLEET_RUNNER."
+            )
+        key = job.result_key
         if self.store.exists(key):
             self.broker.complete(self.lease, key)
             return "cached"

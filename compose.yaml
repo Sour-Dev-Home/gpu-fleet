@@ -1,6 +1,8 @@
 # Local stack: one broker and N workers (ADR 0014). Tokens come only from the environment (the vault):
 #   ./scripts/with-secrets.ps1 -Names FLEET_WORKER_TOKEN,FLEET_ADMIN_TOKEN -- docker compose up
-# Add jobs:   docker compose run --rm broker fleet-enqueue --demo 20
+# Add jobs matching the workers' runner (a worker stops on a job for another runner's prompt version):
+#   echo (default):    docker compose run --rm broker fleet-enqueue --demo 20 --prompt-version echo-v1
+#   FLEET_RUNNER=smoke: docker compose run --rm broker fleet-enqueue --demo 20   (smoke-v1)
 # More workers: docker compose up --scale worker=3
 # No .env or secrets files: both would put tokens on disk.
 
@@ -27,6 +29,7 @@ services:
       retries: 3
       start_period: 10s
       start_interval: 1s
+    restart: unless-stopped # back after a crash or a Docker restart; the job store is on the volume
 
   worker:
     build: ./worker
@@ -40,7 +43,8 @@ services:
       FLEET_ALLOW_HTTP: "1"
       # The worker token only; the admin token (adding jobs) stays with the broker.
       FLEET_WORKER_TOKEN: ${FLEET_WORKER_TOKEN:?set FLEET_WORKER_TOKEN, e.g. via scripts/with-secrets.ps1}
-      FLEET_RUNNER: ${FLEET_RUNNER:-echo} # echo needs no GPU; smoke asks the model server
+      # echo (echo-v1 jobs) needs no GPU; smoke (smoke-v1 jobs) asks the model server.
+      FLEET_RUNNER: ${FLEET_RUNNER:-echo}
       # The model server (native Ollama on the host GPU) runs outside Docker, see ADR 0014.
       FLEET_MODEL_URL: ${FLEET_MODEL_URL:-http://host.docker.internal:11434}
     extra_hosts:

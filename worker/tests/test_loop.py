@@ -1,5 +1,5 @@
 import pytest
-from fakes import FakeBroker, FakeClock, FakeStore
+from fakes import FakeBroker, FakeClock, FakeStore, declares
 from fleet_worker.loop import LeaseLost, Worker
 from fleet_worker.protocol import Job, Lease
 
@@ -15,7 +15,7 @@ def setup(runner, ttl: float = 60.0):
     clock, store = FakeClock(), FakeStore()
     lease = Lease(job=JOB, lease_token="t", ttl_seconds=ttl, received_at=clock())
     broker = FakeBroker([lease], store, clock)
-    return Worker(broker, store, runner, clock), broker, store, clock
+    return Worker(broker, store, declares(runner, JOB.prompt_version), clock), broker, store, clock
 
 
 def quick_runner(job, keepalive):

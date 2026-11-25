@@ -6,6 +6,12 @@ from fleet_worker.loop import LeaseLost
 from fleet_worker.protocol import Lease
 
 
+def declares(runner, *prompt_versions: str):
+    """Give a test runner (often a lambda) the prompt versions Worker requires it to declare."""
+    runner.prompt_versions = frozenset(prompt_versions)
+    return runner
+
+
 class FakeClock:
     def __init__(self, now: float = 1000.0) -> None:
         self.now = now
