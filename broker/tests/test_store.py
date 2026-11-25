@@ -1,3 +1,4 @@
+import sqlite3
 import threading
 
 from fleet_broker.store import JobStore
@@ -63,3 +64,36 @@ def test_concurrent_claims_never_share_a_job(tmp_path):
         t.join()
     # each job claimed exactly once
     assert sorted(claimed) == sorted(f"j{i}" for i in range(50))
+
+
+# --- schema migration (ADR 0012) ---
+
+OLD_SCHEMA = """
+CREATE TABLE jobs (
+    job_id TEXT PRIMARY KEY, input_sha256 TEXT NOT NULL, model TEXT NOT NULL,
+    prompt_version TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued',
+    attempts INTEGER NOT NULL DEFAULT 0, lease_token TEXT, lease_expires_at REAL,
+    result_key TEXT
+);
+INSERT INTO jobs (job_id, input_sha256, model, prompt_version) VALUES ('old', 'a', 'm', 'v1');
+"""
+
+
+def test_an_older_database_gains_the_column_and_keeps_its_jobs(tmp_path):
+    path = tmp_path / "broker.db"
+    db = sqlite3.connect(path)
+    db.executescript(OLD_SCHEMA)
+    db.close()
+
+    s = JobStore(path)  # opening it runs the migration
+    claim = s.claim(now=1000.0, ttl_seconds=60)
+    assert claim.job_id == "old"
+    assert claim.context_sha256 is None  # old rows read as "no context"
+    s.close()
+    JobStore(path).close()  # a second open must not try to add the column again
+
+
+def test_context_round_trips_through_a_claim(tmp_path):
+    s = JobStore(tmp_path / "broker.db")
+    s.add("j", "a" * 64, "m", "v1", context_sha256="c" * 64)
+    assert s.claim(now=1000.0, ttl_seconds=60).context_sha256 == "c" * 64

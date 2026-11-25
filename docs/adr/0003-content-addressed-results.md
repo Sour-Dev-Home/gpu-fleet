@@ -21,7 +21,8 @@ so a job sometimes runs twice. Workers also crash between steps.
 - Results double as a cache, so the same work under a new job id is never recomputed.
 - Changing the key scheme makes every old result look missing. A new scheme needs a version prefix and an ADR.
 - Jobs whose output depends on more than these three fields (for example Metaphor pass 2, which depends on the
-  story bible) must add that context to the key, or the cache serves stale results. Proposed for step 3b.
+  story bible) must add that context to the key, or the cache serves stale results. See
+  [0012](0012-context-hash-in-result-key.md).
 
 ## Alternatives considered
 - **Random result ids plus a "done" flag:** duplicates create orphaned copies, and there's no free cache.

@@ -6,6 +6,7 @@ from fleet_broker.app import create_app
 from fleet_broker.store import JobStore
 from fleet_worker.http_broker import HttpBroker
 from fleet_worker.loop import LeaseLost, Worker
+from fleet_worker.protocol import result_key
 
 # test values, not secrets
 WORKER = "test-worker-token-0123456789abcdefghij"
@@ -124,3 +125,24 @@ def test_worker_that_stalls_loses_the_job_to_another(fleet):
         worker(stalls).run_once()
     assert row("j0")["state"] == "done"
     assert row("j0")["attempts"] == 2
+
+
+def test_context_reaches_the_worker_and_keys_its_result(tmp_path):
+    clock = Clock()
+    app = create_app(tmp_path / "broker.db", WORKER, ADMIN, ttl_seconds=60, clock=clock)
+    admin = TestClient(app, headers={"Authorization": f"Bearer {ADMIN}"})
+    http = TestClient(app, headers={"Authorization": f"Bearer {WORKER}"})
+    ctx = "c" * 64
+    job = {"job_id": "p2", "input_sha256": "a" * 64, "model": "m", "prompt_version": "v1"}
+    assert admin.post("/jobs", json=job | {"context_sha256": ctx}).status_code == 201
+
+    store = DictStore()
+    seen = []
+
+    def runner(job, keepalive):
+        seen.append(job.context_sha256)
+        return b"description"
+
+    Worker(HttpBroker(http, clock=clock, allow_http=True), store, runner, clock).run_once()
+    assert seen == [ctx]
+    assert list(store.data) == [result_key("a" * 64, "m", "v1", ctx)]

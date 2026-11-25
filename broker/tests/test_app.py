@@ -139,3 +139,9 @@ def test_complete_is_idempotent_over_http(worker):
     done = {"job_id": "j0", "lease_token": lease["lease_token"], "result_key": "f" * 64}
     assert worker.post("/complete", json=done).status_code == 204
     assert worker.post("/complete", json=done).status_code == 204  # retry after a lost response
+
+
+def test_context_must_be_a_sha256_when_given(tmp_path):
+    c = as_(ADMIN, tmp_path)
+    assert c.post("/jobs", json=JOB | {"context_sha256": "story bible"}).status_code == 422
+    assert c.post("/jobs", json=JOB | {"context_sha256": "c" * 64}).status_code == 201
