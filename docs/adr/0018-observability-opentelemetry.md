@@ -1,0 +1,35 @@
+# 0018. Observability with OpenTelemetry: metrics, logs and traces
+
+**Status:** Accepted (maintainer, 2026-11-25, Q27-Q32). Implementation: phase 3b.
+**Date:** 2026-11-25
+
+## Context
+The fleet has questions only telemetry answers: is the queue falling behind, which model or prompt version is
+slow, why a job was leased three times. Phase 7's KEDA autoscaler also needs a queue-depth metric to scale on.
+The broker becomes public in phase 4, so whatever exposes telemetry must not expose it to everyone.
+
+## Decision
+- **OpenTelemetry** for all three signals. The code instruments once; where data goes is configuration.
+- **Local backend:** the `grafana/otel-lgtm` image (OTel collector, Prometheus, Loki, Tempo, Grafana) as an
+  opt-in Compose profile, `docker compose --profile obs up`. [Image name and contents verified at build time.]
+- **Metrics:** jobs by state and data class; age of the oldest queued job; lease expiries; dead letters; 503s;
+  job duration (histogram) by model and prompt version; model tokens per second; cache hits.
+- **Traces and logs:** one trace per job attempt (lease, run, model call, store, complete). Logs are structured
+  JSON with `job_id` and `trace_id`. Logs and spans never carry tokens, lease tokens or input content: IDs and
+  data class only.
+- **Push, not scrape:** services push OTLP to a collector; no public `/metrics` endpoint. On Cloud Run the
+  exporter targets Google Cloud Monitoring and Trace (free allowances); no paid vendor.
+- **As code:** one Grafana dashboard (provisioned JSON), two alerts (any dead letter; oldest queued job older than
+  10 minutes) and one SLO (95% of jobs done within 15 minutes of enqueue).
+
+## Consequences
+- A slow job is traceable from its log line to the span that took the time.
+- KEDA (phase 7) scales on the same queue-depth metric the dashboard shows.
+- Telemetry adds dependencies (the OTel SDK) to both packages; with no collector configured they export nothing.
+- Attributes are chosen with cardinality in mind: `job_id` belongs on spans and logs, never as a metric label.
+
+## Alternatives considered
+- **A vendor SDK (Datadog, New Relic):** lock-in, and paid beyond small free tiers.
+- **Prometheus scraping a `/metrics` endpoint:** the classic pull model; fine locally, but on a public broker it
+  publishes queue sizes to anyone. Push keeps it private.
+- **Logs only:** cheapest, but answers only the questions someone thought to log.

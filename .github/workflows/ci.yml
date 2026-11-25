@@ -31,6 +31,13 @@ jobs:
           for d in $(find infra -name '*.tf' -printf '%h\n' | sort -u); do
             terraform -chdir="$d" init -backend=false -input=false && terraform -chdir="$d" validate
           done
+      - uses: terraform-linters/setup-tflint@6ffdbaa3be476b3431f7275c26966ef32ff60337 # v6.3.2
+        with:
+          tflint_version: v0.66.0
+          # SHA256 of tflint_linux_amd64.zip from the release's checksums.txt; bump with the version.
+          checksums: 22be11cadc25cd02401e94c0ccc91aa63467debb8485c2a755d98f4c0a9d1e2e
+      - name: tflint (bundled Terraform ruleset, .tflint.hcl)
+        run: tflint --recursive --config "$PWD/.tflint.hcl" --format compact
       - name: Trivy config scan (Terraform, Dockerfiles, Kubernetes)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
