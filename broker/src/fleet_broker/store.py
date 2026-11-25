@@ -52,9 +52,10 @@ class JobStore:
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
 
-    def add(
-        self, job_id: str, input_sha256: str, model: str, prompt_version: str
-    ) -> None:
+    def close(self) -> None:
+        self.db.close()
+
+    def add(self, job_id: str, input_sha256: str, model: str, prompt_version: str) -> None:
         """Queue a job. Adding the same job_id again is a no-op (idempotent enqueue)."""
         self.db.execute(
             "INSERT OR IGNORE INTO jobs (job_id, input_sha256, model, prompt_version)"
@@ -63,9 +64,7 @@ class JobStore:
         )
 
     def get(self, job_id: str) -> sqlite3.Row | None:
-        return self.db.execute(
-            "SELECT * FROM jobs WHERE job_id = ?", (job_id,)
-        ).fetchone()
+        return self.db.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
 
     def claim(self, now: float, ttl_seconds: float) -> Claim | None:
         """Lease the oldest available job to the caller, or return None if there is none.

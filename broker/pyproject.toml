@@ -5,10 +5,16 @@ description = "Fleet broker: job leases, heartbeats and completion over HTTP"
 readme = "README.md"
 license = "GPL-3.0-or-later"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "fastapi>=0.165.0",
+]
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "fleet-worker",
+    "httpx>=0.28.1",
+    "pytest>=8",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -17,3 +23,7 @@ build-backend = "hatchling.build"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
+
+[tool.uv.sources]
+# the worker package, for end-to-end tests of the real loop against this broker
+fleet-worker = { path = "../worker", editable = true }

@@ -10,9 +10,7 @@ JOB = Job(
 
 def lease(ttl_seconds: float = 60.0, received_at: float = 1000.0) -> Lease:
     # received_at is an arbitrary monotonic reading: only differences between readings mean anything
-    return Lease(
-        job=JOB, lease_token="t", ttl_seconds=ttl_seconds, received_at=received_at
-    )
+    return Lease(job=JOB, lease_token="t", ttl_seconds=ttl_seconds, received_at=received_at)
 
 
 def test_job_result_key_matches_protocol_function():

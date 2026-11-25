@@ -46,9 +46,7 @@ class FakeBroker:
         self.heartbeats.append(lease)
         if self.refuse_heartbeats:
             raise LeaseLost(lease.job.job_id)
-        return replace(
-            lease, received_at=self.clock(), lease_token=lease.lease_token + "+"
-        )
+        return replace(lease, received_at=self.clock(), lease_token=lease.lease_token + "+")
 
     def complete(self, lease: Lease, result_key: str) -> None:
         # A real broker can't see S3 this directly, but the rule is the same: never mark

@@ -1,0 +1,4 @@
+# One ruff config for every Python package in the repo (worker/, broker/, ...).
+# 100 columns: at 88, ruff format kept wrapping annotations with trailing comments
+# into "x: (\n  float  # comment\n)" blocks.
+line-length = 100
