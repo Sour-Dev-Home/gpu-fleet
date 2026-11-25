@@ -1,7 +1,7 @@
 """`fleet-enqueue`: add jobs to the broker through its own API, with the admin token.
 
-  fleet-enqueue --demo 20                          20 demo jobs for the smoke runner (smoke-v1)
-  fleet-enqueue --demo 20 --prompt-version echo-v1 20 demo jobs for the echo runner
+  fleet-enqueue --demo 20                           20 demo jobs for the echo runner (echo-v1)
+  fleet-enqueue --demo 20 --prompt-version smoke-v1 20 demo jobs for the smoke runner
   fleet-enqueue --demo 20 --run b                  the same 20 inputs under new job ids ("b")
   --model picks the jobs' model (default qwen3:8b). Each runner implements fixed prompt
   versions; a worker stops on a job for another one (ADR 0014 amendment).
@@ -25,7 +25,8 @@ import urllib.error
 import urllib.request
 
 DEMO_MODEL = "qwen3:8b"
-DEMO_PROMPT_VERSION = "smoke-v1"
+# echo-v1: matches Compose's default runner (echo), so the default demo just works.
+DEMO_PROMPT_VERSION = "echo-v1"
 
 
 def demo_jobs(
@@ -67,7 +68,7 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
     p.add_argument(
         "--prompt-version",
         default=DEMO_PROMPT_VERSION,
-        help="must be one the workers' runner implements: smoke-v1 (default) or echo-v1",
+        help="must be one the workers' runner implements: echo-v1 (default) or smoke-v1",
     )
     p.add_argument("--model", default=DEMO_MODEL, help=f"model for the jobs (default {DEMO_MODEL})")
     args = p.parse_args(argv)

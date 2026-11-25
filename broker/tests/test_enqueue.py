@@ -38,16 +38,16 @@ def posted_jobs(monkeypatch, argv):
     return jobs
 
 
-def test_demo_jobs_default_to_the_smoke_runners_version_and_model(monkeypatch):
+def test_demo_jobs_default_to_the_echo_runner_composes_default(monkeypatch):
     jobs = posted_jobs(monkeypatch, ["--demo", "2", "--run", "x"])
-    assert {(j["model"], j["prompt_version"]) for j in jobs} == {("qwen3:8b", "smoke-v1")}
+    assert {(j["model"], j["prompt_version"]) for j in jobs} == {("qwen3:8b", "echo-v1")}
 
 
 def test_prompt_version_and_model_can_be_chosen(monkeypatch):
-    # e.g. --prompt-version echo-v1 for the echo runner, which refuses smoke-v1 jobs
-    argv = ["--demo", "2", "--run", "x", "--prompt-version", "echo-v1", "--model", "qwen3:14b"]
+    # e.g. --prompt-version smoke-v1 for the smoke runner, which refuses echo-v1 jobs
+    argv = ["--demo", "2", "--run", "x", "--prompt-version", "smoke-v1", "--model", "qwen3:14b"]
     jobs = posted_jobs(monkeypatch, argv)
-    assert {(j["model"], j["prompt_version"]) for j in jobs} == {("qwen3:14b", "echo-v1")}
+    assert {(j["model"], j["prompt_version"]) for j in jobs} == {("qwen3:14b", "smoke-v1")}
 
 
 def test_all_accepted_succeeds(monkeypatch, capsys):

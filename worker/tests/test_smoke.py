@@ -2,8 +2,10 @@ import json
 
 import httpx
 import pytest
+from fakes import FakeBroker, FakeClock, FakeStore
 from fleet_worker.cli import Config
-from fleet_worker.protocol import Job
+from fleet_worker.loop import Worker
+from fleet_worker.protocol import Job, Lease
 from fleet_worker.smoke import ModelServerUnavailable, check_model_server, make_smoke
 
 JOB = Job("j7", "a" * 64, "qwen3:8b", "smoke-v1")
@@ -69,6 +71,29 @@ def test_smoke_asks_for_the_jobs_model():
 def test_smoke_implements_smoke_v1_only():
     smoke = make_smoke(model_server(lambda r: streamed("ok")))
     assert getattr(smoke, "prompt_versions", None) == frozenset({"smoke-v1"})
+
+
+def ollama_404(request):
+    # What Ollama answers on /api/generate for a model it doesn't have.
+    model = json.loads(request.content)["model"]
+    return httpx.Response(404, json={"error": f"model '{model}' not found"})
+
+
+def test_a_missing_model_stops_the_worker_with_the_pull_command():
+    job = Job("j9", "a" * 64, "qwen3:14b", "smoke-v1")
+    with pytest.raises(SystemExit, match=r"ollama pull qwen3:14b"):
+        make_smoke(model_server(ollama_404))(job, lambda: None)
+
+
+def test_a_missing_model_stores_and_completes_nothing():
+    clock, store = FakeClock(), FakeStore()
+    broker = FakeBroker([Lease(JOB, "t", 60, clock())], store, clock)
+    worker = Worker(broker, store, make_smoke(model_server(ollama_404)), clock)
+    polls = iter(range(5))  # bounded: a worker that moved on would end the test, not hang it
+    with pytest.raises(SystemExit, match="qwen3:8b"):
+        worker.run(sleep=lambda s: None, should_stop=lambda: next(polls, None) is None)
+    assert store.puts == 0
+    assert broker.completed == []
 
 
 def test_a_model_server_error_is_not_swallowed():

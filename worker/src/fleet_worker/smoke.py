@@ -25,6 +25,12 @@ class ModelServerUnavailable(SystemExit):
     """Raised at startup: the worker can't do anything useful, so it exits with this message."""
 
 
+class ModelNotFound(ModelServerUnavailable):
+    """A job names a model the model server doesn't have. Like a prompt-version mismatch, that
+    is misconfiguration, not a bad job: the worker stops instead of burning the job's attempts
+    (ADR 0014 amendment)."""
+
+
 def check_model_server(client: httpx.Client, model: str) -> None:
     """Fail at startup, with a message a person can act on, instead of on every job.
 
@@ -58,6 +64,12 @@ def make_smoke(client: httpx.Client) -> Runner:
         parts: list[str] = []
         # Streamed newline-delimited JSON: one object per chunk, the last has "done": true.
         with client.stream("POST", "/api/generate", json=body) as r:
+            if r.status_code == 404:  # Ollama: "model '<name>' not found"
+                raise ModelNotFound(
+                    f"fleet-worker: job {job.job_id} needs model {job.model!r}, which the model "
+                    f"server at {client.base_url} doesn't have; run `ollama pull {job.model}`. "
+                    "Stopping: nothing stored or completed."
+                )
             r.raise_for_status()
             for line in r.iter_lines():
                 if not line:

@@ -1,8 +1,8 @@
 # Local stack: one broker and N workers (ADR 0014). Tokens come only from the environment (the vault):
 #   ./scripts/with-secrets.ps1 -Names FLEET_WORKER_TOKEN,FLEET_ADMIN_TOKEN -- docker compose up
 # Add jobs matching the workers' runner (a worker stops on a job for another runner's prompt version):
-#   echo (default):    docker compose run --rm broker fleet-enqueue --demo 20 --prompt-version echo-v1
-#   FLEET_RUNNER=smoke: docker compose run --rm broker fleet-enqueue --demo 20   (smoke-v1)
+#   echo (default):     docker compose run --rm broker fleet-enqueue --demo 20   (echo-v1)
+#   FLEET_RUNNER=smoke: docker compose run --rm broker fleet-enqueue --demo 20 --prompt-version smoke-v1
 # More workers: docker compose up --scale worker=3
 # No .env or secrets files: both would put tokens on disk.
 
@@ -51,7 +51,10 @@ services:
       - "host.docker.internal:host-gateway" # Docker Desktop has this name already; Linux Engine needs it
     volumes:
       - results:/results # content-addressed results, shared by every worker replica
-    restart: unless-stopped
+    # "no" until ADR 0015's capability filtering lands, then unless-stopped again. A worker stops
+    # on a job it can't run (prompt version, missing model); with unless-stopped it restarted,
+    # leased the same job again and dead-lettered it after 3 leases. Stopped, the job just waits.
+    restart: "no"
     # Time to finish the job in hand after SIGTERM; a longer job is retried when its lease expires.
     stop_grace_period: 30s
     deploy:

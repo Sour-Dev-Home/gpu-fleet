@@ -21,9 +21,11 @@ updates:
     groups:
       docker: { patterns: ["*"] }
     ignore:
-      # Digest bumps only (ADR 0014 amendment): python stays on the 3.11 CI tests with,
+      # Digest bumps only (ADR 0014 amendment). python: no new minor or major, so the image
+      # stays on 3.11, the version CI tests.
       - dependency-name: python
         update-types: [version-update:semver-major, version-update:semver-minor]
-      # and uv stays on the version ci.yml pins (pip install uv==0.13.10); move both together.
+      # uv: no version updates, since ci.yml pins it separately (pip install uv==0.13.10);
+      # bump both together by hand.
       - dependency-name: "*astral-sh/uv"
         update-types: [version-update:semver-major, version-update:semver-minor, version-update:semver-patch]

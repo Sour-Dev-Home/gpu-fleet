@@ -55,6 +55,11 @@ Approved by the maintainer after the phase 2b-2 review.
   locally before a build.
 - **Dependabot bumps digests only** for `python` (no minor or major: the image stays on the 3.11 CI tests)
   and for the uv image (no version updates: ci.yml pins uv separately, so both move together by hand).
+- **2026-11-25 (Q17): workers use `restart: "no"` for now.** This temporarily changes the Q12 answer for the
+  worker (the broker keeps `unless-stopped`). With `unless-stopped`, a worker that stops on a job it can't run
+  (a prompt-version mismatch, or a model the model server lacks, which `smoke` now also stops on) was restarted,
+  leased the same job again and dead-lettered it after 3 leases. The worker returns to `unless-stopped` once
+  ADR 0015's capability filtering lands, because then the broker won't lease it such jobs.
 
 ## Consequences
 - One small worker image serves every backend. Changing GPU vendor or model server never rebuilds it.
