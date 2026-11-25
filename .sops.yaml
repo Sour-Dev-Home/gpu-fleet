@@ -1,4 +1,5 @@
 # sops: files matching these paths are encrypted to the owner's age public key (the public key is safe to commit)
 creation_rules:
-  - path_regex: '(^|/)secrets/.*\.enc\.(ya?ml|json|env)$'
+  # [/\\]: on Windows sops matches against a backslash path (secrets\x.enc.yaml), even if you typed "/"
+  - path_regex: '(^|[/\\])secrets[/\\].*\.enc\.(ya?ml|json|env)$'
     age: age10xadetyc9dr78mhluxy2h5vcpp95fzt3ywrqlcfekarfy0zadcnqmc650t
