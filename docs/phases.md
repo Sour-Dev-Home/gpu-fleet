@@ -4,7 +4,7 @@
       printed recovery code), back up the age key as a Secure Note, store a test token in the vault, run a command
       with it, encrypt and decrypt a sops file
 - [x] 0. Repo, worker skeleton, the job protocol, tests (Python packaging, protocol design); Dependabot uv entry
-- [ ] 1. Broker API locally: leases, heartbeats, retries (at-least-once delivery, idempotency)
+- [x] 1. Broker API locally: leases, heartbeats, retries (at-least-once delivery, idempotency)
 - [ ] 2. Docker images for worker and broker; compose locally; Dependabot docker entry
 - [ ] 3. Terraform for AWS: S3 bucket, IAM, remote state; Dependabot terraform entry; `job_class` in the
       schema (docs/security.md gate)

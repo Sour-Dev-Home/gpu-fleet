@@ -50,3 +50,43 @@ lockfile. Three pieces written by me:
 - ruff's 88-character limit wraps inline comments on annotations awkwardly.
 
 **Numbers:** cost $0. 17 tests, run in 0.02 s; CI takes about 1 min.
+
+## Phase 1: broker API locally (2026-11-25)
+
+**Built:**
+- A SQLite job store with a one-statement atomic claim, idempotent enqueue, heartbeats, lazy expiry, dead
+  letters after 3 attempts, and an idempotent complete (#13, #14).
+- A FastAPI broker (`/jobs`, `/lease`, `/heartbeat`, `/complete`), the worker's HTTP client, and end-to-end
+  tests running the worker against the real API in process (#15).
+- `Worker.run()`: short polling with exponential backoff and full jitter, output validation, and mapping
+  transport errors and 5xx to "retry later" (#17).
+- Security pass 1: separate admin and worker tokens, strict request models, no public API docs, workers
+  refusing plain HTTP, and the remaining items gated by phase in docs/security.md (#18).
+- An optional context hash in the result key for Metaphor pass 2, plus add-only schema migrations (#19).
+- ADRs 0001-0012.
+
+**Learned:**
+- The atomic claim: a separate `SELECT` then `UPDATE` lets two workers take the same job (a check-then-act
+  race). One `UPDATE ... WHERE job_id = (SELECT ... LIMIT 1) RETURNING` can't. SQS does the same, with its
+  visibility timeout as the lease and the receipt handle as the token.
+- The token decides who can finish a job: a stale worker's `/complete` gets 409, and its duplicate work does
+  no harm because the content-addressed store just overwrites identical bytes.
+- Full jitter stops a thundering herd: without it, every worker retries at the same instant after an outage.
+- Long polling would break Cloud Run's free tier (billed per second of request time). Short polling with backoff
+  costs about nothing when idle. SQS long polling is cheaper only because SQS bills per request.
+- Least privilege: role tokens now, per-worker tokens when strangers join. A security fix is due before the
+  threat becomes real, or now if it's cheap now and painful to retrofit (`job_class` before phase 3).
+- Expand-only migrations: add a nullable column and old rows keep working. Postgres 11+ does this without
+  rewriting the table.
+- Only append the new key field when it's present, so old cache keys stay valid without a version prefix.
+- Mutation testing caught real gaps: `<` versus `<=` in the dead-letter check, a reset the test didn't prove,
+  and an over-strict name pattern that blocked real Ollama tags.
+
+**Surprises:**
+- `hmac.compare_digest` raises on non-ASCII `str`, so a junk header gave 500 instead of 401.
+- `"²".isdigit()` is True in Python.
+- Stamping `received_at` when the reply arrives errs the unsafe way by a round trip; stamp it before sending.
+- sops on Windows matches creation rules against backslash paths.
+
+**Numbers:** cost $0. Worker 49 tests, broker 53, each suite under 4 s; 8 threads racing 8 claims never
+shared a job. Security pass 1: 0 exploitable today, 12 findings (6 fixed, the rest gated by phase).
