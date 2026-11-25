@@ -11,6 +11,21 @@ A volunteer-computing style job system: a **Broker** hands out **Jobs** to **Wor
 One unit of work the **Broker** hands out: an input, a model and a prompt version, plus an optional **Context**.
 _Avoid_: Task, message
 
+**Data class**:
+Who may receive a **Job**'s input: `footage` (video, audio or frames from the game), `derived` (text produced
+from the game or its footage, such as descriptions, the script table or the story bible) or `open` (material
+that may be shared). Every **Job** states one.
+_Avoid_: Job class, sensitivity, tier
+
+**Clearance**:
+The **Data classes** a worker token may receive, decided by the **Broker**, never declared by the **Worker**.
+_Avoid_: Permission, access level, scope
+
+**Capability**:
+A prompt version a **Worker**'s **Runner** implements, declared by the **Worker** when it asks for a **Lease**,
+together with the models its **Model server** holds.
+_Avoid_: Skill, feature, job class
+
 **Context**:
 Everything besides the input that the prompt depends on, such as Metaphor's story bible and earlier descriptions.
 _Avoid_: Background, history

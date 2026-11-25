@@ -28,8 +28,9 @@ Out of scope everywhere: an attacker on the maintainer's own PC (they would alre
 ## Backlog, gated by phase
 
 **Before phase 3 (schema design):**
-- [ ] Add a `job_class` column (for example `footage`, `text`, `open`) and give each worker token an allowed-classes
-      scope, filtered in the claim's `WHERE`. Copyrighted footage must never be leased to a volunteer (ADR 0002).
+- [ ] Data class on every job, a clearance per worker token, capabilities declared at lease time, all filtered in
+      the atomic claim. Designed in [ADR 0015](adr/0015-data-class-clearance-capabilities.md); built as phase 3's
+      first step. Copyrighted footage must never be leased to a volunteer (ADR 0002).
 
 **Before phase 4 (public broker):**
 - [ ] Rate limits per token on `/lease` and `/heartbeat`, plus a Cloud Run max-instances cap (cost and thread

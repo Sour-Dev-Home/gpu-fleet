@@ -20,5 +20,6 @@ updated to point to it.
 | [0012](0012-context-hash-in-result-key.md) | Context hash in the result key; add-only schema migrations | Accepted |
 | [0013](0013-dev-tooling-scripts.md) | Repo scripts for checking, shipping and mutation testing | Accepted |
 | [0014](0014-container-images-and-compose.md) | Container images and Compose; model server outside the worker; background heartbeat | Accepted |
+| [0015](0015-data-class-clearance-capabilities.md) | Data class, clearance and capabilities decide which worker may lease a job | Accepted (phase 3, step 1) |
 
 Template: Status, Date, Context, Decision, Consequences, Alternatives considered. Keep each one to a page.
