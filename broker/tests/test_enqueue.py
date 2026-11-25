@@ -5,10 +5,12 @@ from fleet_broker.app import create_app
 from fleet_broker.enqueue import demo_jobs, main
 from tokens import ADMIN, WORKER
 
+ALL = {"footage", "derived", "open"}
+
 
 def test_demo_jobs_pass_the_brokers_input_rules(tmp_path):
     # The real contract: every demo job is accepted by the real API (ADR 0011 field rules).
-    app = create_app(tmp_path / "broker.db", WORKER, ADMIN)
+    app = create_app(tmp_path / "broker.db", WORKER, ADMIN, ALL)
     admin = TestClient(app, headers={"Authorization": f"Bearer {ADMIN}"})
     for job in demo_jobs(5, "t"):
         assert admin.post("/jobs", json=job).status_code == 201
@@ -41,7 +43,25 @@ def posted_jobs(monkeypatch, argv):
 
 def test_demo_jobs_default_to_the_echo_runner_composes_default(monkeypatch):
     jobs = posted_jobs(monkeypatch, ["--demo", "2", "--run", "x"])
-    assert {(j["model"], j["prompt_version"]) for j in jobs} == {("qwen3:8b", "echo-v1")}
+    # echo-v1 jobs name the placeholder model "echo", which the echo runner declares (ADR 0015)
+    assert {(j["model"], j["prompt_version"]) for j in jobs} == {("echo", "echo-v1")}
+
+
+def test_a_non_echo_prompt_version_defaults_to_the_smoke_model(monkeypatch):
+    jobs = posted_jobs(monkeypatch, ["--demo", "2", "--run", "x", "--prompt-version", "smoke-v1"])
+    assert {(j["model"], j["prompt_version"]) for j in jobs} == {("qwen3:8b", "smoke-v1")}
+
+
+def test_demo_jobs_are_open_by_default_and_the_class_can_be_chosen(monkeypatch):
+    jobs = posted_jobs(monkeypatch, ["--demo", "2", "--run", "x"])
+    assert {j["data_class"] for j in jobs} == {"open"}
+    jobs = posted_jobs(monkeypatch, ["--demo", "2", "--run", "x", "--data-class", "footage"])
+    assert {j["data_class"] for j in jobs} == {"footage"}
+
+
+def test_an_unknown_data_class_is_refused(monkeypatch):
+    with pytest.raises(SystemExit):
+        posted_jobs(monkeypatch, ["--demo", "1", "--data-class", "secret"])
 
 
 def test_prompt_version_and_model_can_be_chosen(monkeypatch):

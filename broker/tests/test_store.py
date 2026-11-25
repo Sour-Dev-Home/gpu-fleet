@@ -5,6 +5,12 @@ import pytest
 from fleet_broker.store import JobStore
 
 NOW = 1_800_000_000.0  # a fixed wall-clock time; only differences matter
+# Clears everything: these tests are about leases, not about who may take which job (test_clearance.py).
+ANY = {
+    "clearance": {"footage", "derived", "open"},
+    "capabilities": {"describe-v1", "v1"},
+    "models": {"qwen3-vl:8b", "m"},
+}
 
 
 def store_with(tmp_path, n: int) -> JobStore:
@@ -21,12 +27,12 @@ def test_add_is_idempotent(tmp_path):
 
 
 def test_claim_on_empty_queue_returns_none(tmp_path):
-    assert store_with(tmp_path, 0).claim(NOW, 60) is None
+    assert store_with(tmp_path, 0).claim(NOW, 60, **ANY) is None
 
 
 def test_claim_leases_oldest_job(tmp_path):
     store = store_with(tmp_path, 2)
-    claim = store.claim(NOW, 60)
+    claim = store.claim(NOW, 60, **ANY)
     assert claim.job_id == "j0"
     assert claim.lease_expires_at == NOW + 60
     assert claim.attempts == 1
@@ -37,13 +43,13 @@ def test_claim_leases_oldest_job(tmp_path):
 
 def test_claimed_job_is_not_claimed_again(tmp_path):
     store = store_with(tmp_path, 2)
-    assert [store.claim(NOW, 60).job_id for _ in range(2)] == ["j0", "j1"]
-    assert store.claim(NOW, 60) is None
+    assert [store.claim(NOW, 60, **ANY).job_id for _ in range(2)] == ["j0", "j1"]
+    assert store.claim(NOW, 60, **ANY) is None
 
 
 def test_tokens_are_unique(tmp_path):
     store = store_with(tmp_path, 2)
-    assert store.claim(NOW, 60).lease_token != store.claim(NOW, 60).lease_token
+    assert store.claim(NOW, 60, **ANY).lease_token != store.claim(NOW, 60, **ANY).lease_token
 
 
 def test_concurrent_claims_never_share_a_job(tmp_path):
@@ -54,7 +60,7 @@ def test_concurrent_claims_never_share_a_job(tmp_path):
 
     def worker():
         mine = JobStore(tmp_path / "broker.db")
-        while (claim := mine.claim(NOW, 60)) is not None:
+        while (claim := mine.claim(NOW, 60, **ANY)) is not None:
             with lock:
                 claimed.append(claim.job_id)
 
@@ -87,7 +93,7 @@ def test_an_older_database_gains_the_column_and_keeps_its_jobs(tmp_path):
     db.close()
 
     s = JobStore(path)  # opening it runs the migration
-    claim = s.claim(now=1000.0, ttl_seconds=60)
+    claim = s.claim(now=1000.0, ttl_seconds=60, **ANY)
     assert claim.job_id == "old"
     assert claim.context_sha256 is None  # old rows read as "no context"
     s.close()
@@ -97,7 +103,7 @@ def test_an_older_database_gains_the_column_and_keeps_its_jobs(tmp_path):
 def test_context_round_trips_through_a_claim(tmp_path):
     s = JobStore(tmp_path / "broker.db")
     s.add("j", "a" * 64, "m", "v1", context_sha256="c" * 64)
-    assert s.claim(now=1000.0, ttl_seconds=60).context_sha256 == "c" * 64
+    assert s.claim(now=1000.0, ttl_seconds=60, **ANY).context_sha256 == "c" * 64
 
 
 def test_a_store_can_be_closed_from_another_thread(tmp_path):

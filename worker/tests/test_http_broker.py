@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 from fakes import FakeClock
@@ -23,7 +25,7 @@ def broker(responses: dict[str, httpx.Response], clock: FakeClock) -> HttpBroker
         return responses[request.url.path]
 
     client = httpx.Client(base_url="http://broker", transport=httpx.MockTransport(handler))
-    return HttpBroker(client, clock=clock, allow_http=True)
+    return HttpBroker(client, {"v1"}, {"m"}, clock=clock, allow_http=True)
 
 
 def a_lease(received_at: float) -> Lease:
@@ -71,7 +73,7 @@ def test_other_errors_are_not_mistaken_for_lease_lost():
 )
 def test_refuses_to_send_the_token_over_plain_http_to_a_remote_host(url):
     with pytest.raises(ValueError, match="refusing"):
-        HttpBroker(httpx.Client(base_url=url))
+        HttpBroker(httpx.Client(base_url=url), {"v1"}, {"m"})
 
 
 @pytest.mark.parametrize(
@@ -86,4 +88,31 @@ def test_refuses_to_send_the_token_over_plain_http_to_a_remote_host(url):
     ],
 )
 def test_https_and_loopback_are_allowed(url):
-    HttpBroker(httpx.Client(base_url=url))
+    HttpBroker(httpx.Client(base_url=url), {"v1"}, {"m"})
+
+
+# --- ADR 0015: the lease request declares what this worker can run ---
+
+
+def test_lease_sends_capabilities_and_models():
+    sent = []
+
+    def handler(request):
+        sent.append((request.url.path, json.loads(request.content)))
+        return httpx.Response(204)
+
+    client = httpx.Client(base_url="http://broker", transport=httpx.MockTransport(handler))
+    b = HttpBroker(
+        client, {"smoke-v1", "echo-v1"}, {"qwen3:8b"}, clock=FakeClock(), allow_http=True
+    )
+    b.lease()
+    path, body = sent[0]
+    assert path == "/lease"
+    assert body == {"capabilities": ["echo-v1", "smoke-v1"], "models": ["qwen3:8b"]}
+
+
+@pytest.mark.parametrize("caps, models", [((), {"m"}), ({"v1"}, ())])
+def test_declaring_nothing_is_refused_at_construction(caps, models):
+    client = httpx.Client(base_url="http://127.0.0.1:8000")
+    with pytest.raises(ValueError, match="at least one"):
+        HttpBroker(client, caps, models)

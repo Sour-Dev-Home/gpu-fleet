@@ -73,6 +73,13 @@ def test_plain_http_to_a_service_name_needs_an_explicit_opt_in(tmp_path):
     client.close()
 
 
+def test_the_worker_declares_its_runners_capabilities_to_the_broker(tmp_path):
+    worker, client = build(Config(ENV | {"FLEET_RESULTS_DIR": str(tmp_path)}))
+    client.close()
+    assert worker.broker.capabilities == ["echo-v1"]
+    assert worker.broker.models == ["echo"]
+
+
 def test_echo_runner_is_deterministic():
     job = Job("j", "a" * 64, "m", "v1")
     assert echo(job, lambda: None) == echo(job, lambda: None)

@@ -147,3 +147,14 @@ def test_the_prompt_depends_only_on_what_the_result_key_covers():
     smoke(SAME_INPUT, lambda: None)
     assert JOB.result_key == SAME_INPUT.result_key
     assert prompts[0] == prompts[1]
+
+
+def test_startup_check_returns_the_models_on_the_server():
+    tags = {"models": [{"name": "qwen3:8b"}, {"name": "llama3:8b"}]}
+    names = check_model_server(model_server(lambda r: httpx.Response(200, json=tags)), "qwen3:8b")
+    assert names == {"qwen3:8b", "llama3:8b"}
+
+
+def test_smoke_declares_the_models_it_was_given():
+    smoke = make_smoke(model_server(lambda r: streamed("ok")), {"qwen3:8b", "llama3:8b"})
+    assert smoke.models == frozenset({"qwen3:8b", "llama3:8b"})

@@ -46,7 +46,10 @@ function Invoke-Run([string]$Runner, [string]$PromptVersion, [int]$Workers) {
   $env:FLEET_RUNNER = $Runner
   Invoke-Compose up -d --wait broker
   Invoke-Compose up -d --scale "worker=$Workers" worker
-  Invoke-Compose run --rm broker fleet-enqueue --demo $Jobs --prompt-version $PromptVersion --model $Model
+  # echo jobs name the placeholder model "echo" (fleet-enqueue's default for echo-v1, ADR 0015);
+  # only the smoke jobs name the real model.
+  $modelArgs = if ($Runner -eq 'smoke') { @('--model', $Model) } else { @() }
+  Invoke-Compose run --rm broker fleet-enqueue --demo $Jobs --prompt-version $PromptVersion @modelArgs
 
   $clock = [Diagnostics.Stopwatch]::StartNew()
   $deadline = (Get-Date).AddMinutes($TimeoutMinutes)

@@ -3,8 +3,10 @@
   fleet-enqueue --demo 20                           20 demo jobs for the echo runner (echo-v1)
   fleet-enqueue --demo 20 --prompt-version smoke-v1 20 demo jobs for the smoke runner
   fleet-enqueue --demo 20 --run b                  the same 20 inputs under new job ids ("b")
-  --model picks the jobs' model (default qwen3:8b). Each runner implements fixed prompt
-  versions; a worker stops on a job for another one (ADR 0014 amendment).
+  --model picks the jobs' model (default "echo" for echo-v1, else qwen3:8b).
+  --data-class footage|derived|open (default open): who may see the inputs (ADR 0015).
+  A job is leased only to a worker whose clearance covers its class and which declared its
+  prompt version and model; others stay queued.
 
 Reads FLEET_ADMIN_TOKEN and FLEET_BROKER_URL (default http://127.0.0.1:8000). In Compose it
 runs inside the broker container, which already holds the admin token (ADR 0014):
@@ -29,20 +31,31 @@ import urllib.request
 DEMO_MODEL = "qwen3:8b"
 # echo-v1: matches Compose's default runner (echo), so the default demo just works.
 DEMO_PROMPT_VERSION = "echo-v1"
+# The echo runner declares this placeholder model; jobs for it must name it (ADR 0015).
+ECHO_MODEL = "echo"
+DATA_CLASSES = ("footage", "derived", "open")
+DEMO_DATA_CLASS = "open"  # demo inputs are made-up numbers, safe for any worker
+
+
+def default_model(prompt_version: str) -> str:
+    return ECHO_MODEL if prompt_version == DEMO_PROMPT_VERSION else DEMO_MODEL
 
 
 def demo_jobs(
     count: int,
     run: str,
-    model: str = DEMO_MODEL,
+    model: str | None = None,
     prompt_version: str = DEMO_PROMPT_VERSION,
+    data_class: str = DEMO_DATA_CLASS,
 ) -> list[dict[str, str]]:
+    model = model or default_model(prompt_version)
     return [
         {
             "job_id": f"demo-{run}-{i}",
             "input_sha256": hashlib.sha256(f"demo-input-{i}".encode()).hexdigest(),
             "model": model,
             "prompt_version": prompt_version,
+            "data_class": data_class,
         }
         for i in range(count)
     ]
@@ -121,8 +134,18 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
         default=DEMO_PROMPT_VERSION,
         help="must be one the workers' runner implements: echo-v1 (default) or smoke-v1",
     )
-    p.add_argument("--model", default=DEMO_MODEL, help=f"model for the jobs (default {DEMO_MODEL})")
+    p.add_argument(
+        "--model",
+        help=f"model for the jobs (default {ECHO_MODEL} for echo-v1, else {DEMO_MODEL})",
+    )
+    p.add_argument(
+        "--data-class",
+        choices=DATA_CLASSES,
+        default=DEMO_DATA_CLASS,
+        help=f"who may see the inputs (default {DEMO_DATA_CLASS} for --demo)",
+    )
     args = p.parse_args(argv)
+    model = args.model or default_model(args.prompt_version)
 
     token = env.get("FLEET_ADMIN_TOKEN")
     if not token:
@@ -132,7 +155,7 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
 
     statuses = [
         post_job_with_retries(base_url, token, job)
-        for job in demo_jobs(args.demo, args.run, args.model, args.prompt_version)
+        for job in demo_jobs(args.demo, args.run, model, args.prompt_version, args.data_class)
     ]
     added = statuses.count(201)
     print(f"fleet-enqueue: {added}/{len(statuses)} jobs added (run {args.run})")

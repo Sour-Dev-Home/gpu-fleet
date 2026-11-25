@@ -6,9 +6,11 @@ from fleet_worker.loop import LeaseLost
 from fleet_worker.protocol import Lease
 
 
-def declares(runner, *prompt_versions: str):
-    """Give a test runner (often a lambda) the prompt versions Worker requires it to declare."""
+def declares(runner, *prompt_versions: str, models=("test-model",)):
+    """Give a test runner (often a lambda) the prompt versions and models Worker requires it to
+    declare. The in-memory broker doesn't filter by model, so the name only has to exist."""
     runner.prompt_versions = frozenset(prompt_versions)
+    runner.models = frozenset(models)
     return runner
 
 
