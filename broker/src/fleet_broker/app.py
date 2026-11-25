@@ -135,6 +135,12 @@ def create_app(
     worker = [Depends(_bearer_checker(worker_token, "worker"))]
     admin = [Depends(_bearer_checker(admin_token, "admin"))]
 
+    @app.get("/healthz", status_code=204)
+    def healthz() -> Response:
+        # For Compose, Cloud Run and Kubernetes probes: "the process is up", nothing more.
+        # No auth, so it must reveal nothing: no body, no version, no database status (ADR 0014).
+        return Response(status_code=204)
+
     @app.post("/jobs", status_code=201, dependencies=admin)
     def add_job(job: NewJob, s: Store) -> None:
         s.add(job.job_id, job.input_sha256, job.model, job.prompt_version, job.context_sha256)

@@ -5,6 +5,7 @@ fakes, phase 1 plugs in the HTTP broker client and phase 3 an S3 store behind pr
 """
 
 import logging
+import threading
 import time
 from collections.abc import Callable
 from typing import Literal, Protocol
@@ -67,20 +68,69 @@ class Worker:
         runner: Runner,
         clock: Callable[[], float] = time.monotonic,
         validate: Callable[[Job, bytes], None] = require_nonempty,
+        heartbeat_poll_seconds: float = 1.0,
     ) -> None:
         self.broker = broker
         self.store = store
         self.runner = runner
         self.clock = clock
         self.validate = validate
+        # How often the background heartbeat checks whether the lease is due. Renewal happens
+        # at 2/3 of the TTL; polling every second is free and far finer than any real TTL.
+        self.heartbeat_poll_seconds = heartbeat_poll_seconds
         # the current lease; keepalive() replaces it on renewal
         self.lease: Lease | None = None
+        # keepalive() runs on two threads (the runner's and the heartbeat's): one at a time
+        self._lease_lock = threading.Lock()
 
     def keepalive(self) -> None:
-        """Heartbeat if the current lease is due for renewal. Raises LeaseLost if the broker refuses."""
-        assert self.lease is not None
-        if self.lease.needs_renewal(self.clock()):
-            self.lease = self.broker.heartbeat(self.lease)
+        """Heartbeat if the current lease is due for renewal. Raises LeaseLost if the broker refuses.
+
+        Runners may still call it, but don't need to: process() also renews from a background
+        thread while the runner works (ADR 0014), so a runner can block for as long as it likes.
+        """
+        with self._lease_lock:
+            assert self.lease is not None
+            if self.lease.needs_renewal(self.clock()):
+                self.lease = self.broker.heartbeat(self.lease)
+
+    def _run_with_heartbeat(self, job: Job) -> bytes:
+        """Run the runner while a background thread keeps the lease alive.
+
+        Raises LeaseLost (after the runner returns) if the broker refused a renewal, and
+        re-raises anything fatal the heartbeat hit. A TransientError (broker briefly
+        unreachable) is retried at the next poll: the lease usually has a third of its TTL left.
+        """
+        done = threading.Event()
+        problem: list[Exception] = []
+
+        def beat() -> None:
+            while not done.wait(self.heartbeat_poll_seconds):
+                try:
+                    self.keepalive()
+                except TransientError as e:
+                    log.warning("heartbeat failed, retrying: %s", e)
+                # LeaseLost, 401, bugs: stop beating and hand the error to the main thread,
+                # which re-raises it. Uncaught, it would die silently with this thread.
+                except Exception as e:  # noqa: BLE001
+                    problem.append(e)
+                    return
+
+        thread = threading.Thread(target=beat, name="heartbeat", daemon=True)
+        thread.start()
+        try:
+            result = self.runner(job, self.keepalive)
+        finally:
+            done.set()
+            thread.join()
+        if problem:
+            if isinstance(problem[0], LeaseLost):
+                # The work is done and valid bytes are content-addressed: keep them, so whoever
+                # holds the job now finds the result and completes without running it again.
+                self.validate(job, result)
+                self.store.put(job.result_key, result)
+            raise problem[0]
+        return result
 
     def run_once(self) -> Outcome | None:
         """Lease and process one job. Returns None when the broker has no work."""
@@ -102,7 +152,7 @@ class Worker:
         if self.store.exists(key):
             self.broker.complete(self.lease, key)
             return "cached"
-        result = self.runner(self.lease.job, self.keepalive)
+        result = self._run_with_heartbeat(self.lease.job)
         self.validate(self.lease.job, result)  # raises InvalidResult: nothing stored or completed
         self.store.put(key, result)
         self.broker.complete(self.lease, key)

@@ -9,6 +9,9 @@ dependencies = [
     "fastapi>=0.165.0",
 ]
 
+[project.scripts]
+fleet-enqueue = "fleet_broker.enqueue:main"
+
 [dependency-groups]
 dev = [
     "fleet-worker",
