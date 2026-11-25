@@ -16,5 +16,6 @@ updated to point to it.
 | [0008](0008-short-polling-with-backoff.md) | Short polling with exponential backoff and jitter | Accepted |
 | [0009](0009-ci-supply-chain.md) | CI supply chain: SHA-pinned actions, Dependabot cooldown | Accepted |
 | [0010](0010-worker-failure-handling.md) | Worker failure handling; invalid output is never stored | Accepted |
+| [0011](0011-broker-auth-hardening.md) | Admin and worker tokens; strict inputs; no public API docs | Proposed |
 
 Template: Status, Date, Context, Decision, Consequences, Alternatives considered. Keep each one to a page.

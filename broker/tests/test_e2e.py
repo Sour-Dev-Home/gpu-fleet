@@ -7,7 +7,9 @@ from fleet_broker.store import JobStore
 from fleet_worker.http_broker import HttpBroker
 from fleet_worker.loop import LeaseLost, Worker
 
-TOKEN = "test-worker-token"
+# test values, not secrets
+WORKER = "test-worker-token-0123456789abcdefghij"
+ADMIN = "test-admin-token-0123456789abcdefghijk"
 
 
 class Clock:
@@ -38,8 +40,9 @@ class DictStore:
 @pytest.fixture
 def fleet(tmp_path):
     clock = Clock()
-    app = create_app(tmp_path / "broker.db", TOKEN, ttl_seconds=60, clock=clock)
-    http = TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"})
+    app = create_app(tmp_path / "broker.db", WORKER, ADMIN, ttl_seconds=60, clock=clock)
+    http = TestClient(app, headers={"Authorization": f"Bearer {WORKER}"})
+    admin = TestClient(app, headers={"Authorization": f"Bearer {ADMIN}"})
     store = DictStore()
 
     def add(job_id: str, input_sha256: str = "a" * 64) -> None:
@@ -49,10 +52,11 @@ def fleet(tmp_path):
             "model": "m",
             "prompt_version": "v1",
         }
-        assert http.post("/jobs", json=job).status_code == 201
+        assert admin.post("/jobs", json=job).status_code == 201
 
     def worker(runner) -> Worker:
-        return Worker(HttpBroker(http, clock=clock), store, runner, clock)
+        # TestClient's base URL is http://testserver, an in-process app with no network
+        return Worker(HttpBroker(http, clock=clock, allow_http=True), store, runner, clock)
 
     def row(job_id: str):
         s = JobStore(tmp_path / "broker.db")

@@ -1,5 +1,6 @@
 """The worker's side of the broker API: implements the Broker protocol over HTTP."""
 
+import ipaddress
 import time
 from collections.abc import Callable
 from dataclasses import replace
@@ -8,6 +9,14 @@ import httpx
 
 from .loop import LeaseLost, TransientError
 from .protocol import Job, Lease
+
+
+def _is_loopback_ip(host: str) -> bool:
+    """127.0.0.0/8 and ::1 in any spelling; hostnames like 127.0.0.1.evil.com are not IPs."""
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 class HttpBroker:
@@ -19,7 +28,18 @@ class HttpBroker:
         broker = HttpBroker(client)
     """
 
-    def __init__(self, client: httpx.Client, clock: Callable[[], float] = time.monotonic):
+    def __init__(
+        self,
+        client: httpx.Client,
+        clock: Callable[[], float] = time.monotonic,
+        allow_http: bool = False,
+    ):
+        # The bearer token rides on every request: never send it in cleartext to a remote
+        # host. Plain http is fine for loopback, or when a test explicitly allows it.
+        url = client.base_url
+        loopback = url.host == "localhost" or _is_loopback_ip(url.host)
+        if url.scheme != "https" and not (loopback or allow_http):
+            raise ValueError(f"refusing to send the worker token over {url.scheme}://{url.host}")
         self.client = client
         self.clock = clock
 
