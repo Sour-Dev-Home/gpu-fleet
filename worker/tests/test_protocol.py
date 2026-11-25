@@ -6,9 +6,7 @@ INPUT = "a" * 64  # stands in for a real SHA-256 hex digest
 
 
 def test_result_key_is_a_sha256_hex_digest():
-    assert re.fullmatch(
-        r"[0-9a-f]{64}", result_key(INPUT, "qwen3-vl:8b", "describe-v1")
-    )
+    assert re.fullmatch(r"[0-9a-f]{64}", result_key(INPUT, "qwen3-vl:8b", "describe-v1"))
 
 
 def test_result_key_is_deterministic():
