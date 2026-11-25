@@ -51,3 +51,7 @@ jobs:
           pip install uv==0.13.10
           export UV_PYTHON_DOWNLOADS=never # use setup-python's 3.11; fail loudly if missing
           bash scripts/check.sh tests
+      - name: Build images (no push; a registry comes in phase 4, ADR 0014)
+        run: |
+          docker build -t fleet-worker:ci worker
+          docker build -t fleet-broker:ci broker
