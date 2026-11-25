@@ -97,3 +97,21 @@ def test_context_round_trips_through_a_claim(tmp_path):
     s = JobStore(tmp_path / "broker.db")
     s.add("j", "a" * 64, "m", "v1", context_sha256="c" * 64)
     assert s.claim(now=1000.0, ttl_seconds=60).context_sha256 == "c" * 64
+
+
+def test_a_store_can_be_closed_from_another_thread(tmp_path):
+    # FastAPI runs a sync dependency's setup and teardown on different pool threads, so the
+    # per-request store is created on one thread and closed on another (found under load).
+    s = JobStore(tmp_path / "broker.db")
+    errors = []
+
+    def close():
+        try:
+            s.close()
+        except sqlite3.ProgrammingError as e:
+            errors.append(e)
+
+    t = threading.Thread(target=close)
+    t.start()
+    t.join()
+    assert errors == []

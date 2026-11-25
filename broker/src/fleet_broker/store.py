@@ -50,14 +50,28 @@ class Claim:
 
 
 class JobStore:
-    def __init__(self, path: str | Path, max_attempts: int = 3) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        max_attempts: int = 3,
+        busy_timeout: float = 5.0,
+        wal: bool = False,
+    ) -> None:
         # A job leased this many times without completing is a "poison" job: it goes to
         # the 'dead' state for a human to look at instead of being retried forever.
         self.max_attempts = max_attempts
         # isolation_level=None: autocommit, so each statement is its own atomic transaction.
-        # timeout: wait up to 5 s for another connection's write lock instead of failing.
-        self.db = sqlite3.connect(path, isolation_level=None, timeout=5.0)
+        # timeout: wait up to this long for another connection's write lock instead of failing.
+        # check_same_thread=False: FastAPI sets a per-request store up and tears it down on
+        # different pool threads. Safe: one request uses its connection strictly one step at a time.
+        self.db = sqlite3.connect(
+            path, isolation_level=None, timeout=busy_timeout, check_same_thread=False
+        )
         self.db.row_factory = sqlite3.Row
+        if wal:
+            # Readers no longer block the writer or the reverse (ADR 0016). Persistent in the
+            # database file, so the broker sets it once at startup, not per request.
+            self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
         self._migrate()
 

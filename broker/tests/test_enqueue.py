@@ -54,3 +54,83 @@ def test_all_accepted_succeeds(monkeypatch, capsys):
     monkeypatch.setattr(enqueue, "post_job", lambda *a: 201)
     assert main(["--demo", "3", "--run", "x"], env={"FLEET_ADMIN_TOKEN": ADMIN}) == 0
     assert "3/3 jobs added" in capsys.readouterr().out
+
+
+# --- retries (ADR 0016) ---
+
+
+class Net:
+    """A scripted post_job: each call returns the next status, or raises it if an exception."""
+
+    def __init__(self, *script):
+        self.script = list(script)
+        self.calls = 0
+
+    def __call__(self, url, token, job):
+        self.calls += 1
+        step = self.script.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        return step
+
+
+def run_enqueue(monkeypatch, net):
+    sleeps = []
+    monkeypatch.setattr(enqueue, "post_job", net)
+    monkeypatch.setattr(enqueue, "_sleep", sleeps.append)
+    monkeypatch.setattr(enqueue, "_random", lambda: 1.0)  # full jitter at its maximum
+    code = main(["--demo", "1", "--run", "x"], env={"FLEET_ADMIN_TOKEN": ADMIN})
+    return code, sleeps
+
+
+def test_503_then_201_counts_as_added(monkeypatch, capsys):
+    net = Net(503, 503, 201)
+    code, sleeps = run_enqueue(monkeypatch, net)
+    assert (code, net.calls, sleeps) == (0, 3, [0.5, 1.0])  # base 0.5 s, doubling
+    assert "1/1 jobs added" in capsys.readouterr().out
+
+
+def test_five_503s_fail_the_job(monkeypatch):
+    net = Net(503, 503, 503, 503, 503)
+    code, sleeps = run_enqueue(monkeypatch, net)
+    assert (code, net.calls, len(sleeps)) == (1, 5, 4)
+
+
+def test_422_is_tried_once(monkeypatch):
+    net = Net(422)
+    code, sleeps = run_enqueue(monkeypatch, net)
+    assert (code, net.calls, sleeps) == (1, 1, [])
+
+
+def test_connection_errors_are_retried(monkeypatch):
+    import urllib.error
+
+    net = Net(urllib.error.URLError("refused"), ConnectionResetError(), TimeoutError(), 201)
+    code, _ = run_enqueue(monkeypatch, net)
+    assert (code, net.calls) == (0, 4)
+
+
+def test_backoff_is_capped_and_jittered():
+    waits = [enqueue.backoff(a, None, lambda: 1.0) for a in range(1, 7)]
+    assert waits == [0.5, 1.0, 2.0, 4.0, 8.0, 8.0]
+    assert enqueue.backoff(3, None, lambda: 0.0) == 0.0
+
+
+def test_post_job_reads_retry_after_from_a_503(monkeypatch):
+    import email.message
+    import urllib.error
+
+    headers = email.message.Message()
+    headers["Retry-After"] = "7"
+
+    def fake_urlopen(req, timeout):
+        raise urllib.error.HTTPError(req.full_url, 503, "busy", headers, None)
+
+    monkeypatch.setattr(enqueue.urllib.request, "urlopen", fake_urlopen)
+    status = enqueue.post_job("http://x", "t", {"job_id": "j"})
+    assert (int(status), status.retry_after) == (503, 7.0)
+
+
+def test_retry_after_is_the_minimum_wait():
+    assert enqueue.backoff(1, 3.0, lambda: 0.0) == 3.0
+    assert enqueue.backoff(5, 1.0, lambda: 1.0) == 8.0

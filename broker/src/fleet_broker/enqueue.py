@@ -19,6 +19,7 @@ import argparse
 import hashlib
 import json
 import os
+import random
 import sys
 import time
 import urllib.error
@@ -46,6 +47,43 @@ def demo_jobs(
     ]
 
 
+MAX_ATTEMPTS = 5
+BACKOFF_BASE = 0.5  # seconds; doubles per attempt
+BACKOFF_CAP = 8.0
+_sleep = time.sleep  # injectable for tests
+_random = random.random
+
+
+class Status(int):
+    """An HTTP status that also remembers the response's Retry-After seconds, if any."""
+
+    retry_after: float | None = None
+
+
+def backoff(attempt: int, retry_after: float | None, rand=None) -> float:
+    """Seconds to wait after failed attempt number `attempt` (1-based): full jitter, so
+    concurrent clients spread out, but never less than the server's Retry-After."""
+    rand = rand or _random
+    wait = rand() * min(BACKOFF_CAP, BACKOFF_BASE * 2 ** (attempt - 1))
+    return max(wait, retry_after or 0.0)
+
+
+def post_job_with_retries(base_url: str, token: str, job: dict[str, str]) -> int:
+    """POST /jobs, retrying 503 and connection errors. Safe: the endpoint is INSERT OR IGNORE.
+    4xx is never retried. Returns the last status, or 0 if no attempt got an answer."""
+    status = 0
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            status = post_job(base_url, token, job)
+        except (urllib.error.URLError, ConnectionError, TimeoutError):
+            status = 0
+        if status not in (0, 503):
+            return status
+        if attempt < MAX_ATTEMPTS:
+            _sleep(backoff(attempt, getattr(status, "retry_after", None)))
+    return status
+
+
 def post_job(base_url: str, token: str, job: dict[str, str]) -> int:
     req = urllib.request.Request(
         f"{base_url.rstrip('/')}/jobs",
@@ -57,7 +95,12 @@ def post_job(base_url: str, token: str, job: dict[str, str]) -> int:
         with urllib.request.urlopen(req, timeout=10) as r:
             return r.status
     except urllib.error.HTTPError as e:
-        return e.code
+        status = Status(e.code)
+        try:
+            status.retry_after = float(e.headers.get("Retry-After", ""))
+        except ValueError:
+            pass  # absent, or an HTTP-date we don't parse: plain backoff applies
+        return status
 
 
 def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> int:
@@ -80,7 +123,7 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
     base_url = env.get("FLEET_BROKER_URL", "http://127.0.0.1:8000")
 
     statuses = [
-        post_job(base_url, token, job)
+        post_job_with_retries(base_url, token, job)
         for job in demo_jobs(args.demo, args.run, args.model, args.prompt_version)
     ]
     added = statuses.count(201)
