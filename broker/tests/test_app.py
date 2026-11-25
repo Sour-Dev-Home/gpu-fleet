@@ -1,10 +1,8 @@
 import pytest
 from fastapi.testclient import TestClient
 from fleet_broker.app import create_app
+from tokens import ADMIN, WORKER
 
-# test values, not secrets; long enough to pass MIN_TOKEN_LENGTH
-WORKER = "test-worker-token-0123456789abcdefghij"
-ADMIN = "test-admin-token-0123456789abcdefghijk"
 JOB = {"job_id": "j0", "input_sha256": "a" * 64, "model": "qwen3-vl:8b", "prompt_version": "v1"}
 
 

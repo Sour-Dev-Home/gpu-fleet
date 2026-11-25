@@ -7,10 +7,7 @@ from fleet_broker.store import JobStore
 from fleet_worker.http_broker import HttpBroker
 from fleet_worker.loop import LeaseLost, Worker
 from fleet_worker.protocol import result_key
-
-# test values, not secrets
-WORKER = "test-worker-token-0123456789abcdefghij"
-ADMIN = "test-admin-token-0123456789abcdefghijk"
+from tokens import ADMIN, WORKER
 
 
 class Clock:

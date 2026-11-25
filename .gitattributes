@@ -1,0 +1,8 @@
+# Store and check out text as LF on every OS, so Windows' core.autocrlf neither converts
+# files nor prints "LF will be replaced by CRLF" on every git command. PowerShell 7,
+# Python, Terraform and Docker all read LF fine.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.age binary
