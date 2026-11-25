@@ -143,3 +143,9 @@ def test_context_must_be_a_sha256_when_given(tmp_path):
     c = as_(ADMIN, tmp_path)
     assert c.post("/jobs", json=JOB | {"context_sha256": "story bible"}).status_code == 422
     assert c.post("/jobs", json=JOB | {"context_sha256": "c" * 64}).status_code == 201
+
+
+def test_healthz_needs_no_token_and_reveals_nothing(tmp_path):
+    r = as_(None, tmp_path).get("/healthz")
+    assert r.status_code == 204
+    assert r.content == b""
