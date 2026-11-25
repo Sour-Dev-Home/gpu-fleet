@@ -182,13 +182,17 @@ class Worker:
                 "enqueue jobs for this runner or start the worker with the matching FLEET_RUNNER."
             )
         key = job.result_key
+        # IDs and labels only (jsonlog.ALLOWED_EXTRAS): never the input or the result.
+        fields = {"job_id": job.job_id, "model": job.model, "prompt_version": job.prompt_version}
         if self.store.exists(key):
             self.broker.complete(self.lease, key)
+            log.info("job completed from a stored result", extra={**fields, "status": "cached"})
             return "cached"
         result = self._run_with_heartbeat(self.lease.job)
         self.validate(self.lease.job, result)  # raises InvalidResult: nothing stored or completed
         self.store.put(key, result)
         self.broker.complete(self.lease, key)
+        log.info("job completed", extra={**fields, "status": "ran"})
         return "ran"
 
     def run(

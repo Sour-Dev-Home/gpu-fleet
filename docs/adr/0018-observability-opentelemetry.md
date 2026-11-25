@@ -22,6 +22,22 @@ The broker becomes public in phase 4, so whatever exposes telemetry must not exp
 - **As code:** one Grafana dashboard (provisioned JSON), two alerts (any dead letter; oldest queued job older than
   10 minutes) and one SLO (95% of jobs done within 15 minutes of enqueue).
 
+### Details (maintainer, 2026-11-25, Q34-Q38; facts in docs/research/phase-3b.md)
+- **Optional extra:** OTel ships as `fleet-worker[otel]` / `fleet-broker[otel]`, installed in the images.
+  Without it, the code only writes JSON logs.
+- **Fleet metrics come from the broker**, which sees every lease, heartbeat and completion. Volunteer
+  workers send no telemetry by default; worker traces are for the maintainer's own machines.
+- **Queue gauges are read from the database** (an observable-gauge callback runs one `GROUP BY` query per
+  export), so they're right across restarts and several broker instances. Events (completions, expiries,
+  503s) are counters.
+- **Traces cross the network:** the worker's HTTP calls carry W3C `traceparent`, so the broker's spans sit
+  inside the worker's job trace.
+- **Two log paths:** every record goes to stdout as one JSON line with `trace_id` and `span_id` (the
+  production path; Cloud Run ingests it). With the extra, the same records also go through OTel's logging
+  bridge to Loki. OTel Python logs are still "Development", so only the optional path depends on them.
+- The local stack binds every port to 127.0.0.1 (Grafana's default login is `admin`/`admin`) and keeps
+  `/data` on a named volume. The image is pinned by digest.
+
 ## Consequences
 - A slow job is traceable from its log line to the span that took the time.
 - KEDA (phase 7) scales on the same queue-depth metric the dashboard shows.

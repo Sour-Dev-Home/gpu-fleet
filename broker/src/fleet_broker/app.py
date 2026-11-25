@@ -26,6 +26,7 @@ from typing import Annotated, Literal, get_args
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from . import jsonlog
 from .store import JobStore
 
 log = logging.getLogger("fleet_broker")
@@ -231,6 +232,8 @@ def _from_env() -> FastAPI | None:
     admin_token = os.environ.get("FLEET_ADMIN_TOKEN")
     if not (worker_token and admin_token):
         return None  # imported by tests or tools: no app without both tokens
+    # A real broker process: uvicorn has set up its loggers by now, so replace them with JSON.
+    jsonlog.setup()
     # Required, no default: a forgotten setting must stop the broker, not widen access (ADR 0015).
     raw = os.environ.get("FLEET_WORKER_CLEARANCE", "")
     clearance = {c.strip() for c in raw.split(",") if c.strip()}

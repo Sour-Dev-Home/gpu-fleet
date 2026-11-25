@@ -24,6 +24,7 @@ from collections.abc import Callable, Mapping
 
 import httpx
 
+from . import jsonlog
 from .dir_store import DirStore
 from .http_broker import HttpBroker
 from .loop import Runner, Worker
@@ -126,7 +127,7 @@ def build(config: Config) -> tuple[Worker, httpx.Client]:
 
 
 def main(env: Mapping[str, str] = os.environ) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    jsonlog.setup()  # one JSON object per line on stdout (ADR 0018)
     config = Config(env)
     worker, client = build(config)
     stopper = Stopper()
