@@ -23,3 +23,30 @@ restore drill: decrypting with the key pasted from Bitwarden while the on-disk k
 - Dependabot fails on ecosystems with no manifest yet (#5, which also pinned CI actions by SHA).
 
 **Numbers:** cost $0. Restore time from Bitwarden: about 1 minute.
+
+## Phase 0: worker skeleton and job protocol (2026-11-25)
+**Built:** the `fleet-worker` package (uv, src layout, Python >= 3.11), tested in CI on 3.11 with a locked
+lockfile. Three pieces written by me:
+- `result_key()`, a content address over a JSON list of input hash, model and prompt version (#9).
+- `Lease.needs_renewal()`, which renews once 2/3 of the TTL has passed (#10).
+- `Worker.process()`, which reuses a stored result or runs the job, stores it, then completes (#11).
+
+**Learned:**
+- Leases are rented, not owned: if heartbeats stop, the lease expires and the job goes back in the queue.
+  This is the SQS visibility timeout.
+- Delivery is at-least-once (SQS standard), so jobs must be idempotent. Content-addressed results make
+  a duplicate run a harmless overwrite and a crash after the upload cheap to repair.
+- The order of steps is the error handling: store before complete, like "delete the SQS message only
+  after processing".
+- The broker sends durations, not deadlines, and the worker times them with `time.monotonic()`, so clock
+  skew and clock jumps don't matter.
+- Plain concatenation collides (`"ab"+"c"` equals `"a"+"bc"`).
+- Passing `now` in makes time logic testable without `sleep()`.
+- A test only counts once it has been seen failing: I broke the code on purpose to check the tests caught it.
+
+**Surprises:**
+- Moving `2 / 3` into a constant changes the floating-point arithmetic. It still came out exact for the
+  TTLs the tests use.
+- ruff's 88-character limit wraps inline comments on annotations awkwardly.
+
+**Numbers:** cost $0. 17 tests, run in 0.02 s; CI takes about 1 min.
