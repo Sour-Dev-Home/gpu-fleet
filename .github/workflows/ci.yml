@@ -45,12 +45,9 @@ jobs:
         with:
           recursive: true
       - name: Python tests (each package with a pyproject.toml, on the oldest supported Python)
+        # The same script developers run locally (scripts/check.sh), minus pre-commit,
+        # which ran above.
         run: |
           pip install uv==0.13.10
           export UV_PYTHON_DOWNLOADS=never # use setup-python's 3.11; fail loudly if missing
-          pkgs=$(git ls-files '*pyproject.toml')
-          [ -n "$pkgs" ] || { echo "no pyproject.toml found: nothing tested" >&2; exit 1; }
-          for p in $pkgs; do
-            d=$(dirname "$p")
-            (cd "$d" && uv sync --locked --python 3.11 && uv run --locked --python 3.11 pytest -q)
-          done
+          bash scripts/check.sh tests

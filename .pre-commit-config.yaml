@@ -18,6 +18,9 @@ repos:
     rev: v0.17.6
     hooks:
       - id: ruff
+        # Fix what's safely fixable (import order, RET501, ...) instead of only reporting it.
+        # The hook still fails when it changed a file, so CI never passes unfixed code.
+        args: [--fix]
       - id: ruff-format
   - repo: local
     hooks:
