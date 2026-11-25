@@ -24,7 +24,7 @@ from collections.abc import Callable, Mapping
 
 import httpx
 
-from . import jsonlog
+from . import jsonlog, telemetry
 from .dir_store import DirStore
 from .http_broker import HttpBroker
 from .loop import Runner, Worker
@@ -132,9 +132,13 @@ def main(env: Mapping[str, str] = os.environ) -> int:
     worker, client = build(config)
     stopper = Stopper()
     stopper.install()
+    flush_traces = telemetry.setup(env)  # a no-op unless the [otel] extra and an endpoint are there
     log.info("worker started: %r", config)
-    with client:
-        worker.run(should_stop=stopper.should_stop, sleep=stopper.sleep)
+    try:
+        with client:
+            worker.run(should_stop=stopper.should_stop, sleep=stopper.sleep)
+    finally:
+        flush_traces()  # the last job's spans, before the process exits
     log.info("worker stopped")
     return 0
 

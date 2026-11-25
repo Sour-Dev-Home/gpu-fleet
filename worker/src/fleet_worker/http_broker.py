@@ -7,6 +7,7 @@ from dataclasses import replace
 
 import httpx
 
+from . import telemetry
 from .loop import LeaseLost, TransientError
 from .protocol import Job, Lease
 
@@ -55,7 +56,7 @@ class HttpBroker:
         """POST, turning "the broker is down or failing" into TransientError (retry later).
         4xx answers are returned as they are: they mean something specific (ADR 0007)."""
         try:
-            r = self.client.post(path, **kwargs)
+            r = self.client.post(path, headers=telemetry.inject({}), **kwargs)
         except httpx.TransportError as e:  # connection refused, timeout, DNS, reset
             raise TransientError(f"{path}: {e!r}") from e
         if r.status_code >= 500:

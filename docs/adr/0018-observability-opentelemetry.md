@@ -35,6 +35,13 @@ The broker becomes public in phase 4, so whatever exposes telemetry must not exp
 - **Two log paths:** every record goes to stdout as one JSON line with `trace_id` and `span_id` (the
   production path; Cloud Run ingests it). With the extra, the same records also go through OTel's logging
   bridge to Loki. OTel Python logs are still "Development", so only the optional path depends on them.
+- **Telemetry stays minimal (security review, 2026-11-25):** request spans leave without the caller's IP
+  or user agent, and exception events keep only their type; the broker honours `traceparent` only with
+  the worker token, so strangers can't make it record spans; header capture is refused. OTLP over plain
+  http goes only to loopback, unless `OTEL_EXPORTER_OTLP_INSECURE=true`: a deliberate escape hatch for a
+  private network (the Compose collector) that allows any host, so never set it in the cloud.
+  uvicorn's access log is off: one line per request with the caller's IP, which spans and metrics
+  already cover without it.
 - The local stack binds every port to 127.0.0.1 (Grafana's default login is `admin`/`admin`) and keeps
   `/data` on a named volume. The image is pinned by digest.
 
