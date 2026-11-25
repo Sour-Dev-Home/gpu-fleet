@@ -1,8 +1,7 @@
 version: 2
 # Only ecosystems that have manifests: Dependabot fails ("No files found") on an empty directory.
 # Add each entry in the phase that creates its manifest:
-#   pip (uv)  -> phase 0, directory of the worker's pyproject.toml
-#   docker    -> phase 2, directory of each Dockerfile
+#   docker   -> phase 2, directory of each Dockerfile
 #   terraform -> phase 3, each Terraform root under /infra
 updates:
   - package-ecosystem: github-actions
@@ -10,3 +9,9 @@ updates:
     schedule: { interval: weekly }
     groups:
       actions: { patterns: ["*"] }
+  - package-ecosystem: uv
+    directory: /worker
+    schedule: { interval: weekly }
+    cooldown: { default-days: 7 } # bumps auto-merge: let a fresh release age before it can land
+    groups:
+      python: { patterns: ["*"] }
