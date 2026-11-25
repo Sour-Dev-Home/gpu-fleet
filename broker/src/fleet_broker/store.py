@@ -9,6 +9,7 @@ numbers. Only the broker compares them; workers only ever see durations (ttl_sec
 
 import secrets
 import sqlite3
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,7 +25,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     lease_token      TEXT,                        -- set while leased
     lease_expires_at REAL,                        -- broker wall clock, set while leased
     result_key       TEXT,                        -- set when done
-    context_sha256   TEXT                         -- NULL: no context (ADR 0012)
+    context_sha256   TEXT,                        -- NULL: no context (ADR 0012)
+    data_class       TEXT                         -- NULL: treated as footage (ADR 0015)
 );
 """
 
@@ -32,7 +34,12 @@ CREATE TABLE IF NOT EXISTS jobs (
 # skips a table that already exists, so an older database gets these with ALTER TABLE.
 # Expand only: add nullable columns, never rename or drop, so old rows and older
 # code keep working (Postgres: the same ALTER TABLE ... ADD COLUMN, no table rewrite).
-MIGRATIONS = [("context_sha256", "TEXT")]
+MIGRATIONS = [("context_sha256", "TEXT"), ("data_class", "TEXT")]
+
+
+def _marks(values: list[str]) -> str:
+    """ "?, ?, ?" for an IN list: only placeholders are formatted into SQL, never values."""
+    return ", ".join("?" * len(values))
 
 
 @dataclass(frozen=True)
@@ -94,20 +101,32 @@ class JobStore:
         model: str,
         prompt_version: str,
         context_sha256: str | None = None,
+        data_class: str | None = None,
     ) -> None:
         """Queue a job. Adding the same job_id again is a no-op (idempotent enqueue)."""
         self.db.execute(
             "INSERT OR IGNORE INTO jobs"
-            " (job_id, input_sha256, model, prompt_version, context_sha256)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (job_id, input_sha256, model, prompt_version, context_sha256),
+            " (job_id, input_sha256, model, prompt_version, context_sha256, data_class)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (job_id, input_sha256, model, prompt_version, context_sha256, data_class),
         )
 
     def get(self, job_id: str) -> sqlite3.Row | None:
         return self.db.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
 
-    def claim(self, now: float, ttl_seconds: float) -> Claim | None:
-        """Lease the oldest available job to the caller, or return None if there is none.
+    def claim(
+        self,
+        now: float,
+        ttl_seconds: float,
+        clearance: Collection[str],
+        capabilities: Collection[str],
+        models: Collection[str],
+    ) -> Claim | None:
+        """Lease the oldest available job the caller may and can run, or None if there is none.
+
+        May: the job's data class (NULL counts as footage) is in `clearance`. Can: its prompt
+        version is in `capabilities` and its model in `models` (ADR 0015). Other jobs are
+        skipped, stay queued and never burn an attempt.
 
         Available means queued, or leased with an expired lease (lazy expiry: no reaper
         process). Re-leasing gives a new token, so the old worker's heartbeats now fail.
@@ -115,6 +134,9 @@ class JobStore:
         """
         # unguessable: only the leaseholder can heartbeat or complete
         token = secrets.token_urlsafe(16)
+        clearance, capabilities, models = list(clearance), list(capabilities), list(models)
+        if not (clearance and capabilities and models):
+            return None  # nothing can match; also keeps "IN ()" out of the SQL
         # Dead-letter first: an expired job that used up its attempts must never be
         # claimed again. Hands nothing out, so it doesn't need to be atomic with the claim.
         self.db.execute(
@@ -125,11 +147,14 @@ class JobStore:
         row = self.db.execute(
             "UPDATE jobs SET state='leased', lease_token=?, lease_expires_at=?, attempts=attempts+1"
             " WHERE job_id = (SELECT job_id FROM jobs"
-            "   WHERE state='queued' OR (state='leased' AND lease_expires_at <= ?)"
+            "   WHERE (state='queued' OR (state='leased' AND lease_expires_at <= ?))"
+            f"   AND COALESCE(data_class, 'footage') IN ({_marks(clearance)})"
+            f"   AND prompt_version IN ({_marks(capabilities)})"
+            f"   AND model IN ({_marks(models)})"
             "   ORDER BY rowid LIMIT 1)"
             " RETURNING job_id, input_sha256, model, prompt_version, lease_token,"
             "   lease_expires_at, attempts, context_sha256",
-            (token, now + ttl_seconds, now),
+            (token, now + ttl_seconds, now, *clearance, *capabilities, *models),
         ).fetchone()
         if row is None:
             return None

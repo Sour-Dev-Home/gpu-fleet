@@ -142,7 +142,7 @@ def test_unexpected_errors_stop_the_worker():
 
 def http_broker(handler) -> HttpBroker:
     client = httpx.Client(base_url="http://broker", transport=httpx.MockTransport(handler))
-    return HttpBroker(client, clock=FakeClock(), allow_http=True)
+    return HttpBroker(client, {"v1"}, {"m"}, clock=FakeClock(), allow_http=True)
 
 
 def test_5xx_is_transient():

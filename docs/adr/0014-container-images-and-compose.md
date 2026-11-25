@@ -60,6 +60,7 @@ Approved by the maintainer after the phase 2b-2 review.
   (a prompt-version mismatch, or a model the model server lacks, which `smoke` now also stops on) was restarted,
   leased the same job again and dead-lettered it after 3 leases. The worker returns to `unless-stopped` once
   ADR 0015's capability filtering lands, because then the broker won't lease it such jobs.
+  **2026-11-25: done.** ADR 0015 is implemented, so the worker is back to `restart: unless-stopped`.
 
 ## Consequences
 - One small worker image serves every backend. Changing GPU vendor or model server never rebuilds it.

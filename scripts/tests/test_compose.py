@@ -17,10 +17,16 @@ def service(name: str) -> list[str]:
     return block
 
 
-def test_worker_does_not_restart_until_capability_filtering_lands():
-    # With unless-stopped, a worker that stops on a job it can't run (prompt version, model)
-    # restarts, leases the same job again and dead-letters it (ADR 0014 amendment, ADR 0015).
-    assert 'restart: "no"' in service("worker")
+def test_worker_restarts_now_that_the_broker_filters_by_capability():
+    # ADR 0015: the broker never leases a worker a job it can't run, so a restart can't
+    # lease the same unrunnable job again (it was "no" until then, ADR 0014 amendment).
+    assert "restart: unless-stopped" in service("worker")
+
+
+def test_broker_clearance_is_explicit_config():
+    # ADR 0015: required by the broker, no default; the local stack's workers are all the
+    # maintainer's, so they may see every data class.
+    assert "FLEET_WORKER_CLEARANCE: footage,derived,open" in service("broker")
 
 
 def test_broker_restarts():

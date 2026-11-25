@@ -71,6 +71,8 @@ class Runner(Protocol):
     """
 
     prompt_versions: frozenset[str]
+    # The model names it can run; declared to the broker in every lease request (ADR 0015).
+    models: frozenset[str]
 
     def __call__(self, job: Job, keepalive: Callable[[], None], /) -> bytes: ...
 

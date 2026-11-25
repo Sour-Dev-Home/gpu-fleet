@@ -28,9 +28,9 @@ Out of scope everywhere: an attacker on the maintainer's own PC (they would alre
 ## Backlog, gated by phase
 
 **Before phase 3 (schema design):**
-- [ ] Data class on every job, a clearance per worker token, capabilities declared at lease time, all filtered in
-      the atomic claim. Designed in [ADR 0015](adr/0015-data-class-clearance-capabilities.md); built as phase 3's
-      first step. Copyrighted footage must never be leased to a volunteer (ADR 0002).
+- [x] Data class on every job, a clearance per worker token, capabilities declared at lease time, all filtered in
+      the atomic claim. [ADR 0015](adr/0015-data-class-clearance-capabilities.md), built 2026-11-25, each
+      condition mutation-checked. Copyrighted footage must never be leased to a volunteer (ADR 0002).
 
 **Before phase 4 (public broker):**
 - [ ] Rate limits per token on `/lease` and `/heartbeat`, plus a Cloud Run max-instances cap (cost and thread

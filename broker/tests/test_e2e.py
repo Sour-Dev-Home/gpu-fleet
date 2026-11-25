@@ -9,6 +9,8 @@ from fleet_worker.loop import LeaseLost, Worker
 from fleet_worker.protocol import result_key
 from tokens import ADMIN, WORKER
 
+ALL = {"footage", "derived", "open"}
+
 
 class Clock:
     """One fake clock for both sides: the broker reads it as wall time, the worker as
@@ -38,7 +40,7 @@ class DictStore:
 @pytest.fixture
 def fleet(tmp_path):
     clock = Clock()
-    app = create_app(tmp_path / "broker.db", WORKER, ADMIN, ttl_seconds=60, clock=clock)
+    app = create_app(tmp_path / "broker.db", WORKER, ADMIN, ALL, ttl_seconds=60, clock=clock)
     http = TestClient(app, headers={"Authorization": f"Bearer {WORKER}"})
     admin = TestClient(app, headers={"Authorization": f"Bearer {ADMIN}"})
     store = DictStore()
@@ -49,13 +51,16 @@ def fleet(tmp_path):
             "input_sha256": input_sha256,
             "model": "m",
             "prompt_version": "v1",
+            "data_class": "open",
         }
         assert admin.post("/jobs", json=job).status_code == 201
 
     def worker(runner) -> Worker:
         # TestClient's base URL is http://testserver, an in-process app with no network
         runner.prompt_versions = frozenset({"v1"})  # the version add() gives every job
-        return Worker(HttpBroker(http, clock=clock, allow_http=True), store, runner, clock)
+        return Worker(
+            HttpBroker(http, {"v1"}, {"m"}, clock=clock, allow_http=True), store, runner, clock
+        )
 
     def row(job_id: str):
         s = JobStore(tmp_path / "broker.db")
@@ -127,11 +132,17 @@ def test_worker_that_stalls_loses_the_job_to_another(fleet):
 
 def test_context_reaches_the_worker_and_keys_its_result(tmp_path):
     clock = Clock()
-    app = create_app(tmp_path / "broker.db", WORKER, ADMIN, ttl_seconds=60, clock=clock)
+    app = create_app(tmp_path / "broker.db", WORKER, ADMIN, ALL, ttl_seconds=60, clock=clock)
     admin = TestClient(app, headers={"Authorization": f"Bearer {ADMIN}"})
     http = TestClient(app, headers={"Authorization": f"Bearer {WORKER}"})
     ctx = "c" * 64
-    job = {"job_id": "p2", "input_sha256": "a" * 64, "model": "m", "prompt_version": "v1"}
+    job = {
+        "job_id": "p2",
+        "input_sha256": "a" * 64,
+        "model": "m",
+        "prompt_version": "v1",
+        "data_class": "open",
+    }
     assert admin.post("/jobs", json=job | {"context_sha256": ctx}).status_code == 201
 
     store = DictStore()
@@ -142,6 +153,8 @@ def test_context_reaches_the_worker_and_keys_its_result(tmp_path):
         return b"description"
 
     runner.prompt_versions = frozenset({"v1"})
-    Worker(HttpBroker(http, clock=clock, allow_http=True), store, runner, clock).run_once()
+    Worker(
+        HttpBroker(http, {"v1"}, {"m"}, clock=clock, allow_http=True), store, runner, clock
+    ).run_once()
     assert seen == [ctx]
     assert list(store.data) == [result_key("a" * 64, "m", "v1", ctx)]

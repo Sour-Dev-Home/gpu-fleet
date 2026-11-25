@@ -1,6 +1,6 @@
 # 0015. Data class, clearance and capabilities decide which worker may lease a job
 
-**Status:** Accepted (maintainer, 2026-11-25, /grill-with-docs Q1-Q11). Implementation: the first step of phase 3.
+**Status:** Accepted (maintainer, 2026-11-25, /grill-with-docs Q1-Q11). Implemented 2026-11-25 (the first step of phase 3).
 **Date:** 2026-11-25
 **Extends:** [0002](0002-pull-based-broker.md) (footage only to the maintainer's backends); closes the "before
 phase 3" gate in [docs/security.md](../security.md).

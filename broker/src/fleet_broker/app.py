@@ -19,9 +19,9 @@ import logging
 import os
 import sqlite3
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal, get_args
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -39,6 +39,11 @@ Name = Annotated[str, Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9.
 Token = Annotated[str, Field(min_length=1, max_length=128)]
 
 
+DataClass = Literal["footage", "derived", "open"]  # GLOSSARY.md "Data class"
+DATA_CLASSES = frozenset(get_args(DataClass))
+MAX_LIST = 32  # capabilities and models a worker may declare in one lease request
+
+
 class Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")  # unknown fields are an error, not ignored
 
@@ -49,6 +54,14 @@ class NewJob(Strict):
     model: Name
     prompt_version: Name
     context_sha256: Sha256Hex | None = None  # pass 2: hash of the story context (ADR 0012)
+    data_class: DataClass  # required: who may see this input (ADR 0015)
+
+
+class LeaseIn(Strict):
+    """What the worker can run. Its clearance is NOT here: the broker's config sets that."""
+
+    capabilities: Annotated[list[Name], Field(min_length=1, max_length=MAX_LIST)]
+    models: Annotated[list[Name], Field(min_length=1, max_length=MAX_LIST)]
 
 
 class LeaseOut(BaseModel):
@@ -93,6 +106,7 @@ def create_app(
     db_path: str | Path,
     worker_token: str,
     admin_token: str,
+    clearance: Collection[str],
     ttl_seconds: float = 60.0,
     max_attempts: int = 3,
     clock: Callable[[], float] = time.time,
@@ -106,6 +120,12 @@ def create_app(
             raise ValueError(f"{name} token must be at least {MIN_TOKEN_LENGTH} characters")
     if hmac.compare_digest(worker_token.encode(), admin_token.encode()):
         raise ValueError("worker and admin tokens must differ")
+    clearance = frozenset(clearance)
+    if not clearance or not clearance <= DATA_CLASSES:
+        raise ValueError(
+            f"worker clearance must be a non-empty subset of {sorted(DATA_CLASSES)}, "
+            f"got {sorted(clearance)}"
+        )
 
     # No public API description unless asked for (local development only).
     app = FastAPI(
@@ -167,11 +187,18 @@ def create_app(
 
     @app.post("/jobs", status_code=201, dependencies=admin)
     def add_job(job: NewJob, s: Store) -> None:
-        s.add(job.job_id, job.input_sha256, job.model, job.prompt_version, job.context_sha256)
+        s.add(
+            job.job_id,
+            job.input_sha256,
+            job.model,
+            job.prompt_version,
+            job.context_sha256,
+            job.data_class,
+        )
 
     @app.post("/lease", response_model=LeaseOut, dependencies=worker)
-    def lease(s: Store):
-        claim = s.claim(clock(), ttl_seconds)
+    def lease(want: LeaseIn, s: Store):
+        claim = s.claim(clock(), ttl_seconds, clearance, want.capabilities, want.models)
         if claim is None:
             return Response(status_code=204)
         return LeaseOut(
@@ -204,9 +231,18 @@ def _from_env() -> FastAPI | None:
     admin_token = os.environ.get("FLEET_ADMIN_TOKEN")
     if not (worker_token and admin_token):
         return None  # imported by tests or tools: no app without both tokens
+    # Required, no default: a forgotten setting must stop the broker, not widen access (ADR 0015).
+    raw = os.environ.get("FLEET_WORKER_CLEARANCE", "")
+    clearance = {c.strip() for c in raw.split(",") if c.strip()}
+    if not clearance or not clearance <= DATA_CLASSES:
+        raise ValueError(
+            f"FLEET_WORKER_CLEARANCE must be a comma list from {sorted(DATA_CLASSES)}, got {raw!r}"
+        )
     db = Path(os.environ.get("FLEET_DB", "data/broker.db"))
     db.parent.mkdir(parents=True, exist_ok=True)
-    return create_app(db, worker_token, admin_token, docs=os.environ.get("FLEET_DOCS") == "1")
+    return create_app(
+        db, worker_token, admin_token, clearance, docs=os.environ.get("FLEET_DOCS") == "1"
+    )
 
 
 app = _from_env()

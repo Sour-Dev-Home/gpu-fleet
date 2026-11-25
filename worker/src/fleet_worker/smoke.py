@@ -8,7 +8,7 @@ two jobs with the same input share one Result key, so they must get the same ans
 the cache would hand one job a result written for another.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 
 import httpx
 
@@ -31,8 +31,9 @@ class ModelNotFound(ModelServerUnavailable):
     (ADR 0014 amendment)."""
 
 
-def check_model_server(client: httpx.Client, model: str) -> None:
+def check_model_server(client: httpx.Client, model: str) -> set[str]:
     """Fail at startup, with a message a person can act on, instead of on every job.
+    Returns the model names the server has: the worker declares them as its models (ADR 0015).
 
     model is FLEET_MODEL: the model this worker expects its jobs to name. Jobs choose their
     own model; this only catches the common mistake (server down, model not pulled) early.
@@ -48,9 +49,13 @@ def check_model_server(client: httpx.Client, model: str) -> None:
         raise ModelServerUnavailable(
             f"fleet-worker: model {model!r} not on the model server; run `ollama pull {model}`"
         )
+    return names
 
 
-def make_smoke(client: httpx.Client) -> Runner:
+def make_smoke(client: httpx.Client, models: Collection[str] = ()) -> Runner:
+    """models: the names the model server has (from check_model_server). Empty by default:
+    the broker refuses a lease request that declares none, so it fails loudly, not quietly."""
+
     def smoke(job: Job, keepalive: Callable[[], None]) -> bytes:
         body = {
             # The job's model, not FLEET_MODEL: the model is part of the Result key, so the
@@ -85,4 +90,5 @@ def make_smoke(client: httpx.Client) -> Runner:
         return ("".join(parts).strip() + "\n").encode()
 
     smoke.prompt_versions = frozenset({PROMPT_VERSION})
+    smoke.models = frozenset(models)
     return smoke

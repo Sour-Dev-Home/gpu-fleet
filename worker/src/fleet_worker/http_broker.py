@@ -2,7 +2,7 @@
 
 import ipaddress
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import replace
 
 import httpx
@@ -31,9 +31,17 @@ class HttpBroker:
     def __init__(
         self,
         client: httpx.Client,
+        capabilities: Collection[str],
+        models: Collection[str],
         clock: Callable[[], float] = time.monotonic,
         allow_http: bool = False,
     ):
+        # What this worker can run, sent with every lease request (ADR 0015). The broker
+        # leases only matching jobs, and answers 422 to an empty list.
+        if not capabilities or not models:
+            raise ValueError("a worker must declare at least one prompt version and one model")
+        self.capabilities = sorted(capabilities)
+        self.models = sorted(models)
         # The bearer token rides on every request: never send it in cleartext to a remote
         # host. Plain http is fine for loopback, or when a test explicitly allows it.
         url = client.base_url
@@ -59,7 +67,7 @@ class HttpBroker:
         # which is after this moment, so the worker's idea of the expiry is never later
         # than the broker's. Stamping on arrival would err the unsafe way by a round trip.
         sent_at = self.clock()
-        r = self._post("/lease")
+        r = self._post("/lease", json={"capabilities": self.capabilities, "models": self.models})
         if r.status_code == 204:
             return None
         r.raise_for_status()

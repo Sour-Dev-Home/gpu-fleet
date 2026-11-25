@@ -24,9 +24,10 @@ uv lock --check --directory broker
 ./scripts/with-secrets.ps1 -Names FLEET_WORKER_TOKEN,FLEET_ADMIN_TOKEN -- docker compose down
 ```
 
-- Jobs must match the runner: `echo` implements `echo-v1` (`fleet-enqueue`'s default), `smoke` implements
-  `smoke-v1`. A worker given a job for another prompt version, or (smoke) a model the model server doesn't
-  have, stops with an error saying what to fix. It is not restarted until ADR 0015, so the job just waits.
+- Jobs must match the runner: `echo` implements `echo-v1` with model `echo` (`fleet-enqueue`'s defaults),
+  `smoke` implements `smoke-v1` with the models the model server has. Each worker declares these when it
+  leases (ADR 0015); a job no running worker can run stays queued. `--data-class` (default `open`) says who
+  may see a job's input; the broker's `FLEET_WORKER_CLEARANCE` (required) says what the worker token may lease.
 - The default `echo` runner needs no GPU. `$env:FLEET_RUNNER = 'smoke'` before `up` sends one tiny prompt per
   job to the model server: native Ollama on the host at `http://host.docker.internal:11434` (`FLEET_MODEL_URL`).
   Enqueue its jobs with `--prompt-version smoke-v1` (`--model` picks the model, default `qwen3:8b`).

@@ -40,13 +40,15 @@ def echo(job: Job, keepalive: Callable[[], None]) -> bytes:
 
 # Its own prompt version, so echo bytes never land under a smoke (or real) Result key.
 echo.prompt_versions = frozenset({"echo-v1"})
+# echo uses no model; jobs for it name the placeholder model "echo" (ADR 0015).
+echo.models = frozenset({"echo"})
 
 
 def _smoke(config: "Config") -> Runner:
     # Generation can take a while on a busy GPU; the heartbeat thread covers the lease.
     client = httpx.Client(base_url=config.model_url, timeout=httpx.Timeout(10.0, read=300.0))
-    check_model_server(client, config.model)
-    return make_smoke(client)
+    names = check_model_server(client, config.model)  # the models this worker can run
+    return make_smoke(client, names)
 
 
 # Each entry builds its runner from the config, so runners that need a model server get one.
@@ -118,8 +120,8 @@ def build(config: Config) -> tuple[Worker, httpx.Client]:
         headers={"Authorization": f"Bearer {config.token}"},
         timeout=10.0,
     )
-    broker = HttpBroker(client, allow_http=config.allow_http)
     runner = RUNNERS[config.runner_name](config)
+    broker = HttpBroker(client, runner.prompt_versions, runner.models, allow_http=config.allow_http)
     return Worker(broker, DirStore(config.results_dir), runner), client
 
 

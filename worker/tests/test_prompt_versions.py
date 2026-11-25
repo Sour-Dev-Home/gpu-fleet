@@ -66,3 +66,7 @@ def test_run_stops_on_a_mismatch_instead_of_moving_on():
 def test_a_runner_that_declares_no_prompt_versions_is_refused():
     with pytest.raises(TypeError, match="prompt_versions"):
         worker_for(lambda job, keepalive: b"x")
+
+
+def test_echo_declares_the_echo_model_only():
+    assert echo.models == frozenset({"echo"})
