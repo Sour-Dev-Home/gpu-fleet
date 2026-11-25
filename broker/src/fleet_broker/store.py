@@ -26,7 +26,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     lease_expires_at REAL,                        -- broker wall clock, set while leased
     result_key       TEXT,                        -- set when done
     context_sha256   TEXT,                        -- NULL: no context (ADR 0012)
-    data_class       TEXT                         -- NULL: treated as footage (ADR 0015)
+    data_class       TEXT,                        -- NULL: treated as footage (ADR 0015)
+    enqueued_at      REAL,                        -- broker wall clock; NULL for rows before ADR 0018
+    done_at          REAL                         -- set by the first accepted completion
 );
 """
 
@@ -34,7 +36,12 @@ CREATE TABLE IF NOT EXISTS jobs (
 # skips a table that already exists, so an older database gets these with ALTER TABLE.
 # Expand only: add nullable columns, never rename or drop, so old rows and older
 # code keep working (Postgres: the same ALTER TABLE ... ADD COLUMN, no table rewrite).
-MIGRATIONS = [("context_sha256", "TEXT"), ("data_class", "TEXT")]
+MIGRATIONS = [
+    ("context_sha256", "TEXT"),
+    ("data_class", "TEXT"),
+    ("enqueued_at", "REAL"),  # ADR 0018: queue age and the enqueue-to-done SLO
+    ("done_at", "REAL"),
+]
 
 
 def _marks(values: list[str]) -> str:
@@ -54,6 +61,29 @@ class Claim:
     lease_expires_at: float
     attempts: int
     context_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class Completion:
+    """An accepted completion. `first` is False for a repeat (a retry after a lost response),
+    so a metric counts each job once."""
+
+    model: str
+    prompt_version: str
+    data_class: str
+    enqueued_at: float | None
+    done_at: float | None
+    first: bool
+
+
+@dataclass(frozen=True)
+class QueueStats:
+    """What the queue looks like right now (ADR 0018 gauges)."""
+
+    # (state, data_class) -> job count. state adds 'expired': leased, lease run out, not yet
+    # re-leased (lazy expiry keeps such rows in 'leased' until the next claim).
+    counts: dict[tuple[str, str], int]
+    oldest_available_enqueued_at: float | None  # None: nothing available, or only pre-ADR-0018 rows
 
 
 class JobStore:
@@ -102,13 +132,14 @@ class JobStore:
         prompt_version: str,
         context_sha256: str | None = None,
         data_class: str | None = None,
+        now: float | None = None,
     ) -> None:
-        """Queue a job. Adding the same job_id again is a no-op (idempotent enqueue)."""
+        """Queue a job. Adding the same job_id again is a no-op (idempotent enqueue): the
+        first enqueue time stays."""
         self.db.execute(
-            "INSERT OR IGNORE INTO jobs"
-            " (job_id, input_sha256, model, prompt_version, context_sha256, data_class)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (job_id, input_sha256, model, prompt_version, context_sha256, data_class),
+            "INSERT OR IGNORE INTO jobs (job_id, input_sha256, model, prompt_version,"
+            " context_sha256, data_class, enqueued_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (job_id, input_sha256, model, prompt_version, context_sha256, data_class, now),
         )
 
     def get(self, job_id: str) -> sqlite3.Row | None:
@@ -177,16 +208,55 @@ class JobStore:
         ).fetchone()
         return None if row is None else row["lease_expires_at"]
 
-    def complete(self, job_id: str, lease_token: str, result_key: str) -> bool:
-        """Mark the job done with its result key. True if accepted.
+    def complete(
+        self, job_id: str, lease_token: str, result_key: str, now: float | None = None
+    ) -> Completion | None:
+        """Mark the job done with its result key. A Completion if accepted, else None.
 
         Idempotent: repeating the same completion (a retry after a lost response) is
-        accepted again. A stale token, or a different result key for a done job, is not.
+        accepted again, with first=False. A stale token, or a different result key for a
+        done job, is not.
         """
-        cur = self.db.execute(
-            "UPDATE jobs SET state = 'done', result_key = ?"
-            " WHERE job_id = ? AND lease_token = ?"
-            " AND (state = 'leased' OR (state = 'done' AND result_key = ?))",
-            (result_key, job_id, lease_token, result_key),
+        facts = (
+            "model, prompt_version, COALESCE(data_class, 'footage') AS data_class,"
+            " enqueued_at, done_at"
         )
-        return cur.rowcount == 1
+        # The first completion moves leased -> done, atomically: only one caller can win it.
+        # (Telling "first" apart by time would miscount a retry within the same clock tick.)
+        row = self.db.execute(
+            "UPDATE jobs SET state = 'done', result_key = ?, done_at = ?"
+            " WHERE job_id = ? AND lease_token = ? AND state = 'leased'"
+            f" RETURNING {facts}",
+            (result_key, now, job_id, lease_token),
+        ).fetchone()
+        if row is not None:
+            return Completion(**dict(row), first=True)
+        # A repeat of the same completion: accepted, nothing to write.
+        row = self.db.execute(
+            f"SELECT {facts} FROM jobs"
+            " WHERE job_id = ? AND lease_token = ? AND state = 'done' AND result_key = ?",
+            (job_id, lease_token, result_key),
+        ).fetchone()
+        return None if row is None else Completion(**dict(row), first=False)
+
+    def stats(self, now: float) -> QueueStats:
+        """Counts by state and data class, and when the oldest available job was enqueued.
+
+        Read-only, two aggregate queries: cheap enough to run on every metrics export
+        (PostgreSQL: the same GROUP BY; an index on state helps once the table is large)."""
+        counts = {
+            (row["state"], row["data_class"]): row["n"]
+            for row in self.db.execute(
+                "SELECT CASE WHEN state = 'leased' AND lease_expires_at <= ? THEN 'expired'"
+                "   ELSE state END AS state,"
+                " COALESCE(data_class, 'footage') AS data_class, COUNT(*) AS n"
+                " FROM jobs GROUP BY 1, 2",
+                (now,),
+            )
+        }
+        oldest = self.db.execute(
+            "SELECT MIN(enqueued_at) FROM jobs"
+            " WHERE state = 'queued' OR (state = 'leased' AND lease_expires_at <= ?)",
+            (now,),
+        ).fetchone()[0]
+        return QueueStats(counts, oldest)

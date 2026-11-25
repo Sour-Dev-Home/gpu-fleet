@@ -25,12 +25,12 @@ WORKDIR /src
 # Dependencies first: this layer is reused until uv.lock changes, not on every source edit.
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project
+    uv sync --frozen --no-dev --extra otel --no-install-project
 # Then the package itself, installed as a regular (non-editable) copy into the virtualenv.
 COPY README.md ./
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-editable
+    uv sync --frozen --no-dev --extra otel --no-editable
 
 FROM python:3.11-slim@sha256:61e01f72680f86a5279ad510818ab7b2ee9f049822589d4e34e33e044360356c
 # Non-root, fixed uid; /data is created owned by it, so a fresh named volume mounted there is too.

@@ -43,6 +43,12 @@ The broker becomes public in phase 4, so whatever exposes telemetry must not exp
 - KEDA (phase 7) scales on the same queue-depth metric the dashboard shows.
 - Telemetry adds dependencies (the OTel SDK) to both packages; with no collector configured they export nothing.
 - Attributes are chosen with cardinality in mind: `job_id` belongs on spans and logs, never as a metric label.
+  Metric labels come from the job row the maintainer enqueued, never from what a worker sends.
+- Queue gauges are database-wide, so every broker instance reports the same numbers under its own
+  `service.instance.id`: dashboards take the max across instances, never the sum.
+- Before phase 4 (Cloud Run): export through a collector sidecar on localhost that authenticates with
+  the service account (no keys); `--no-cpu-throttling` or accept stalled exports between requests; a
+  budget alert that covers Cloud Monitoring ingestion. The broker flushes metrics on shutdown.
 
 ## Alternatives considered
 - **A vendor SDK (Datadog, New Relic):** lock-in, and paid beyond small free tiers.

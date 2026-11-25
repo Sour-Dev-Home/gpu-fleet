@@ -20,14 +20,16 @@ import os
 import sqlite3
 import time
 from collections.abc import Callable, Collection, Iterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal, get_args
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import jsonlog
+from . import jsonlog, telemetry
 from .store import JobStore
+from .telemetry import Metrics
 
 log = logging.getLogger("fleet_broker")
 
@@ -113,6 +115,7 @@ def create_app(
     clock: Callable[[], float] = time.time,
     docs: bool = False,
     busy_timeout: float = 5.0,
+    metrics: Metrics | None = None,
 ) -> FastAPI:
     for name, token in (("worker", worker_token), ("admin", admin_token)):
         if not token.isascii():  # headers arrive latin-1 decoded: keep tokens plain ASCII
@@ -122,14 +125,21 @@ def create_app(
     if hmac.compare_digest(worker_token.encode(), admin_token.encode()):
         raise ValueError("worker and admin tokens must differ")
     clearance = frozenset(clearance)
+    metrics = metrics or Metrics()
     if not clearance or not clearance <= DATA_CLASSES:
         raise ValueError(
             f"worker clearance must be a non-empty subset of {sorted(DATA_CLASSES)}, "
             f"got {sorted(clearance)}"
         )
 
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        yield
+        metrics.shutdown()  # flush the last metrics window on SIGTERM
+
     # No public API description unless asked for (local development only).
     app = FastAPI(
+        lifespan=lifespan,
         title="fleet broker",
         docs_url="/docs" if docs else None,
         redoc_url=None,
@@ -152,6 +162,7 @@ def create_app(
             else (str(exc) == "database is locked")
         ):
             log.warning("database busy on %s %s: %s", request.method, request.url.path, exc)
+            metrics.busy()
             return Response(status_code=503, headers={"Retry-After": "1"})
         raise exc
 
@@ -195,6 +206,7 @@ def create_app(
             job.prompt_version,
             job.context_sha256,
             job.data_class,
+            now=clock(),
         )
 
     @app.post("/lease", response_model=LeaseOut, dependencies=worker)
@@ -202,6 +214,7 @@ def create_app(
         claim = s.claim(clock(), ttl_seconds, clearance, want.capabilities, want.models)
         if claim is None:
             return Response(status_code=204)
+        metrics.leased(claim)
         return LeaseOut(
             job_id=claim.job_id,
             input_sha256=claim.input_sha256,
@@ -221,8 +234,10 @@ def create_app(
 
     @app.post("/complete", status_code=204, dependencies=worker)
     def complete(done: Completion, s: Store) -> None:
-        if not s.complete(done.job_id, done.lease_token, done.result_key):
+        accepted = s.complete(done.job_id, done.lease_token, done.result_key, now=clock())
+        if accepted is None:
             raise HTTPException(status_code=409, detail="lease lost or different result")
+        metrics.completed(accepted)
 
     return app
 
@@ -244,7 +259,12 @@ def _from_env() -> FastAPI | None:
     db = Path(os.environ.get("FLEET_DB", "data/broker.db"))
     db.parent.mkdir(parents=True, exist_ok=True)
     return create_app(
-        db, worker_token, admin_token, clearance, docs=os.environ.get("FLEET_DOCS") == "1"
+        db,
+        worker_token,
+        admin_token,
+        clearance,
+        docs=os.environ.get("FLEET_DOCS") == "1",
+        metrics=telemetry.setup(db, time.time),
     )
 
 
