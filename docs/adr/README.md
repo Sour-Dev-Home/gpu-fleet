@@ -22,5 +22,7 @@ updated to point to it.
 | [0014](0014-container-images-and-compose.md) | Container images and Compose; model server outside the worker; background heartbeat | Accepted |
 | [0015](0015-data-class-clearance-capabilities.md) | Data class, clearance and capabilities decide which worker may lease a job | Accepted (phase 3, step 1) |
 | [0016](0016-sqlite-busy-handling.md) | SQLite busy handling: WAL, 503 with Retry-After, client retries | Accepted |
+| [0017](0017-terraform-aws-layout-and-state.md) | Terraform for AWS: two stacks, S3 state with native locking, keyless sign-in | Accepted |
+| [0018](0018-observability-opentelemetry.md) | Observability with OpenTelemetry: metrics, logs and traces | Accepted (phase 3b) |
 
 Template: Status, Date, Context, Decision, Consequences, Alternatives considered. Keep each one to a page.

@@ -1,8 +1,15 @@
 version: 2
 # Only ecosystems that have manifests: Dependabot fails ("No files found") on an empty directory.
-# Add each entry in the phase that creates its manifest:
-#   terraform -> phase 3, each Terraform root under /infra
+# Add each entry in the phase that creates its manifest.
 updates:
+  # Provider versions in each root's .terraform.lock.hcl (ADR 0017). CI runs no plan, and a bump can
+  # change defaults: merge by hand only after a local `terraform plan` in each root shows "No changes".
+  - package-ecosystem: terraform
+    directories: [/infra/aws/bootstrap, /infra/aws/fleet]
+    schedule: { interval: weekly }
+    cooldown: { default-days: 7 }
+    groups:
+      terraform: { patterns: ["*"] }
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
@@ -11,7 +18,7 @@ updates:
   - package-ecosystem: uv
     directories: [/worker, /broker]
     schedule: { interval: weekly }
-    cooldown: { default-days: 7 } # bumps auto-merge: let a fresh release age before it can land
+    cooldown: { default-days: 7 } # let a fresh release age before a bump is proposed
     groups:
       python: { patterns: ["*"] }
   - package-ecosystem: docker # base image digests in each Dockerfile (ADR 0014)
