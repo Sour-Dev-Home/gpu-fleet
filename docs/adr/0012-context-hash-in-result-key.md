@@ -1,6 +1,6 @@
 # 0012. Context hash in the result key; add-only schema migrations
 
-**Status:** Proposed (2026-11-25; awaiting the maintainer's sign-off)
+**Status:** Accepted (maintainer, 2026-11-25)
 **Date:** 2026-11-25
 **Extends:** [0003](0003-content-addressed-results.md) (closes its "proposed for step 3b" consequence)
 
