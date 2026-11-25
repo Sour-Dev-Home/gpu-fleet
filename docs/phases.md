@@ -1,6 +1,6 @@
 # Phases
 
-- [ ] 0a. Secrets walkthrough (docs/secrets.md): set up Bitwarden (master passphrase on paper, two-factor with a
+- [x] 0a. Secrets walkthrough (docs/secrets.md): set up Bitwarden (master passphrase on paper, two-factor with a
       printed recovery code), back up the age key as a Secure Note, store a test token in the vault, run a command
       with it, encrypt and decrypt a sops file
 - [ ] 0. Repo, worker skeleton, the job protocol, tests (Python packaging, protocol design); Dependabot pip entry
