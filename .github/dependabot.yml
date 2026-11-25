@@ -10,7 +10,7 @@ updates:
     groups:
       actions: { patterns: ["*"] }
   - package-ecosystem: uv
-    directory: /worker
+    directories: [/worker, /broker]
     schedule: { interval: weekly }
     cooldown: { default-days: 7 } # bumps auto-merge: let a fresh release age before it can land
     groups:

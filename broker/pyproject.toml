@@ -1,0 +1,19 @@
+[project]
+name = "fleet-broker"
+version = "0.0.1"
+description = "Fleet broker: job leases, heartbeats and completion over HTTP"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
