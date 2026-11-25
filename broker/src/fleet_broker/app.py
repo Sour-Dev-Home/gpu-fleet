@@ -116,7 +116,9 @@ def create_app(
     docs: bool = False,
     busy_timeout: float = 5.0,
     metrics: Metrics | None = None,
+    tracing: Callable[[FastAPI], Callable[[], None]] | None = None,
 ) -> FastAPI:
+    """`tracing` instruments the finished app and returns its flush (telemetry.trace_app)."""
     for name, token in (("worker", worker_token), ("admin", admin_token)):
         if not token.isascii():  # headers arrive latin-1 decoded: keep tokens plain ASCII
             raise ValueError(f"{name} token must be ASCII")
@@ -136,6 +138,7 @@ def create_app(
     async def lifespan(_app: FastAPI):
         yield
         metrics.shutdown()  # flush the last metrics window on SIGTERM
+        stop_tracing()
 
     # No public API description unless asked for (local development only).
     app = FastAPI(
@@ -239,6 +242,7 @@ def create_app(
             raise HTTPException(status_code=409, detail="lease lost or different result")
         metrics.completed(accepted)
 
+    stop_tracing = tracing(app) if tracing else (lambda: None)
     return app
 
 
@@ -249,6 +253,9 @@ def _from_env() -> FastAPI | None:
         return None  # imported by tests or tools: no app without both tokens
     # A real broker process: uvicorn has set up its loggers by now, so replace them with JSON.
     jsonlog.setup()
+    # uvicorn's access log is one line per request with the caller's IP: personal data for every
+    # volunteer, and nothing the request spans and metrics don't already say (ADR 0018).
+    logging.getLogger("uvicorn.access").disabled = True
     # Required, no default: a forgotten setting must stop the broker, not widen access (ADR 0015).
     raw = os.environ.get("FLEET_WORKER_CLEARANCE", "")
     clearance = {c.strip() for c in raw.split(",") if c.strip()}
@@ -265,6 +272,7 @@ def _from_env() -> FastAPI | None:
         clearance,
         docs=os.environ.get("FLEET_DOCS") == "1",
         metrics=telemetry.setup(db, time.time),
+        tracing=lambda a: telemetry.trace_app(a, worker_token=worker_token),
     )
 
 

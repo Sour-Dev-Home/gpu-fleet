@@ -10,6 +10,7 @@ import time
 from collections.abc import Callable
 from typing import Literal, Protocol
 
+from . import telemetry
 from .backoff import Backoff
 from .protocol import Job, Lease
 
@@ -158,11 +159,25 @@ class Worker:
 
     def run_once(self) -> Outcome | None:
         """Lease and process one job. Returns None when the broker has no work."""
+        asked = time.time_ns()
         self.lease = self.broker.lease()
         if self.lease is None:
-            return None
+            return None  # no trace for an empty poll: an idle fleet would bury the real ones
+        job = self.lease.job
         try:
-            return self.process()
+            # One trace per attempt, backdated to when the lease was asked for (ADR 0018).
+            with telemetry.span(
+                "job",
+                start_time=asked,
+                **{
+                    "fleet.job_id": job.job_id,
+                    "fleet.model": job.model,
+                    "fleet.prompt_version": job.prompt_version,
+                },
+            ):
+                with telemetry.span("lease", start_time=asked):
+                    pass  # ends now: the time the broker took to hand the job out
+                return self.process()
         finally:
             self.lease = None
 
@@ -185,13 +200,19 @@ class Worker:
         # IDs and labels only (jsonlog.ALLOWED_EXTRAS): never the input or the result.
         fields = {"job_id": job.job_id, "model": job.model, "prompt_version": job.prompt_version}
         if self.store.exists(key):
-            self.broker.complete(self.lease, key)
+            with telemetry.span("complete", **{"fleet.cached": True}):
+                self.broker.complete(self.lease, key)
             log.info("job completed from a stored result", extra={**fields, "status": "cached"})
             return "cached"
-        result = self._run_with_heartbeat(self.lease.job)
+        with telemetry.span("run"):  # the model call: where a slow job spends its time
+            result = self._run_with_heartbeat(self.lease.job)
         self.validate(self.lease.job, result)  # raises InvalidResult: nothing stored or completed
-        self.store.put(key, result)
-        self.broker.complete(self.lease, key)
+        with telemetry.span("store"):
+            self.store.put(key, result)
+        with telemetry.span(
+            "complete"
+        ):  # its POST carries traceparent: the broker's span nests here
+            self.broker.complete(self.lease, key)
         log.info("job completed", extra={**fields, "status": "ran"})
         return "ran"
 

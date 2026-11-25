@@ -208,6 +208,17 @@ def test_from_env_requires_a_valid_clearance(monkeypatch, tmp_path, value):
         _from_env()
 
 
+def test_a_real_broker_writes_no_access_log(monkeypatch, tmp_path):
+    # One line per request with the caller's IP: personal data for every volunteer (ADR 0018).
+    import logging
+
+    access = logging.getLogger("uvicorn.access")
+    monkeypatch.setattr(access, "disabled", False)  # restored after the test
+    env(monkeypatch, tmp_path, "open")
+    _from_env()
+    assert access.disabled
+
+
 def test_from_env_reads_the_clearance_list(monkeypatch, tmp_path):
     env(monkeypatch, tmp_path, "derived, open")
     c = TestClient(_from_env(), headers={"Authorization": f"Bearer {ADMIN}"})
