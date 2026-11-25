@@ -18,6 +18,7 @@ Standard library only, so the broker image needs no HTTP client for it.
 import argparse
 import hashlib
 import json
+import math
 import os
 import random
 import sys
@@ -96,11 +97,18 @@ def post_job(base_url: str, token: str, job: dict[str, str]) -> int:
             return r.status
     except urllib.error.HTTPError as e:
         status = Status(e.code)
-        try:
-            status.retry_after = float(e.headers.get("Retry-After", ""))
-        except ValueError:
-            pass  # absent, or an HTTP-date we don't parse: plain backoff applies
+        status.retry_after = parse_retry_after(e.headers.get("Retry-After", ""))
         return status
+
+
+def parse_retry_after(header: str) -> float | None:
+    """Seconds from a Retry-After header, clamped to [0, BACKOFF_CAP]; None when absent,
+    an HTTP-date (not parsed: plain backoff applies), or not finite ("inf" would crash sleep)."""
+    try:
+        v = float(header)
+    except ValueError:
+        return None
+    return min(max(v, 0.0), BACKOFF_CAP) if math.isfinite(v) else None
 
 
 def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> int:

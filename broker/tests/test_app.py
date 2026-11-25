@@ -179,13 +179,23 @@ def test_locked_database_is_503_with_retry_after(tmp_path, caplog):
     assert c.post("/jobs", json=JOB).status_code == 201  # recovers once the lock is gone
 
 
-def test_other_operational_errors_stay_500(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("message", "code"),
+    [
+        ("no such table: jobs", 1),  # SQLITE_ERROR
+        # SQLITE_LOCKED: a conflict inside one connection, a bug; retrying can't fix it
+        ("database table is locked", 6),
+    ],
+)
+def test_other_operational_errors_stay_500(tmp_path, monkeypatch, message, code):
     import sqlite3
 
     from fleet_broker.store import JobStore
 
     def boom(self, *a, **k):
-        raise sqlite3.OperationalError("no such table: jobs")
+        e = sqlite3.OperationalError(message)
+        e.sqlite_errorcode = code
+        raise e
 
     monkeypatch.setattr(JobStore, "add", boom)
     c = TestClient(

@@ -71,7 +71,9 @@ class JobStore:
         if wal:
             # Readers no longer block the writer or the reverse (ADR 0016). Persistent in the
             # database file, so the broker sets it once at startup, not per request.
-            self.db.execute("PRAGMA journal_mode=WAL")
+            mode = self.db.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+            if mode != "wal":  # e.g. a filesystem without shared memory: SQLite keeps the old mode
+                raise RuntimeError(f"journal_mode=WAL did not take effect (still {mode!r})")
         self.db.executescript(SCHEMA)
         self._migrate()
 

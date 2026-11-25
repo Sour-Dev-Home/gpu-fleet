@@ -1,6 +1,7 @@
 import sqlite3
 import threading
 
+import pytest
 from fleet_broker.store import JobStore
 
 NOW = 1_800_000_000.0  # a fixed wall-clock time; only differences matter
@@ -115,3 +116,10 @@ def test_a_store_can_be_closed_from_another_thread(tmp_path):
     t.start()
     t.join()
     assert errors == []
+
+
+def test_wal_that_does_not_take_effect_is_an_error():
+    # An in-memory database (like a filesystem without WAL support) answers "memory", not "wal":
+    # failing at startup beats running quietly in the mode that starved writers (ADR 0016).
+    with pytest.raises(RuntimeError, match="journal_mode"):
+        JobStore(":memory:", wal=True)

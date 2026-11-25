@@ -35,7 +35,7 @@ request at a time, only handed between threads. It's a bug fix, not a decision, 
 - WAL adds `-wal` and `-shm` files next to the database; they must live on the same local volume
   (WAL does not work on network filesystems). Backups must copy all three or use `.backup`.
 - Full jitter spreads retrying clients out, so retries do not re-create the stampede.
-- A lock held longer than 5 attempts of backoff (about 15 s worst case) still fails the job, loudly:
+- A lock held longer than 5 attempts of backoff (at most 7.5 s of sleeping, 0.5+1+2+4 s; with each attempt's 10 s request timeout, about 58 s in all) still fails the job, loudly:
   `fleet-enqueue` exits non-zero.
 
 ## Alternatives considered

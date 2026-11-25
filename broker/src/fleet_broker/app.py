@@ -121,8 +121,15 @@ def create_app(
     async def busy(request: Request, exc: sqlite3.OperationalError) -> Response:
         # Lock starvation is transient: tell the caller to retry (ADR 0016). Anything else
         # (a missing table, a corrupt file) is a real fault and stays a 500.
-        message = str(exc).lower()
-        if "locked" in message or "busy" in message:
+        # SQLITE_BUSY (5): another connection holds the lock, so waiting helps. SQLITE_LOCKED (6)
+        # is a conflict inside one connection, a bug that retrying can't fix. The primary code is
+        # the low byte (extended codes add flags above it). Without a code, match the BUSY text.
+        code = getattr(exc, "sqlite_errorcode", None)
+        if (
+            (code & 0xFF == sqlite3.SQLITE_BUSY)
+            if code is not None
+            else (str(exc) == "database is locked")
+        ):
             log.warning("database busy on %s %s: %s", request.method, request.url.path, exc)
             return Response(status_code=503, headers={"Retry-After": "1"})
         raise exc
@@ -140,8 +147,8 @@ def create_app(
         return await call_next(request)
 
     def store() -> Iterator[JobStore]:
-        # One SQLite connection per request: requests run on a thread pool, and a
-        # connection must not be shared across threads. Opening one costs well under 1 ms.
+        # One SQLite connection per request, never used by two threads at once (setup, endpoint
+        # and teardown may run on different pool threads, but in turn). Opening one costs < 1 ms.
         s = JobStore(db_path, max_attempts, busy_timeout)
         try:
             yield s

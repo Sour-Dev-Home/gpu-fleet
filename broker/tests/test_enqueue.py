@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 from fleet_broker import enqueue
 from fleet_broker.app import create_app
@@ -134,3 +135,28 @@ def test_post_job_reads_retry_after_from_a_503(monkeypatch):
 def test_retry_after_is_the_minimum_wait():
     assert enqueue.backoff(1, 3.0, lambda: 0.0) == 3.0
     assert enqueue.backoff(5, 1.0, lambda: 1.0) == 8.0
+
+
+def test_the_servers_retry_after_is_the_minimum_wait(monkeypatch):
+    busy = enqueue.Status(503)
+    busy.retry_after = 3.0
+    net = Net(busy, 201)
+    code, sleeps = run_enqueue(monkeypatch, net)
+    assert (code, sleeps) == (0, [3.0])  # jittered backoff alone would be 0.5
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        ("2", 2.0),
+        ("-3", 0.0),
+        ("1e9", 8.0),
+        ("inf", None),
+        ("nan", None),
+        ("", None),
+        ("Wed, 21 Oct 2015 07:28:00 GMT", None),
+    ],
+)
+def test_retry_after_is_finite_and_capped(header, expected):
+    # "inf" made time.sleep raise OverflowError; "1e9" slept for 31 years.
+    assert enqueue.parse_retry_after(header) == expected
