@@ -3,10 +3,10 @@
 - [ ] 0a. Secrets walkthrough (docs/secrets.md): set up Bitwarden (master passphrase on paper, two-factor with a
       printed recovery code), back up the age key as a Secure Note, store a test token in the vault, run a command
       with it, encrypt and decrypt a sops file
-- [ ] 0. Repo, worker skeleton, the job protocol, tests (Python packaging, protocol design)
+- [ ] 0. Repo, worker skeleton, the job protocol, tests (Python packaging, protocol design); Dependabot pip entry
 - [ ] 1. Broker API locally: leases, heartbeats, retries (at-least-once delivery, idempotency)
-- [ ] 2. Docker images for worker and broker; compose locally
-- [ ] 3. Terraform for AWS: S3 bucket, IAM, remote state
+- [ ] 2. Docker images for worker and broker; compose locally; Dependabot docker entry
+- [ ] 3. Terraform for AWS: S3 bucket, IAM, remote state; Dependabot terraform entry
 - [ ] 4. Terraform for Google Cloud: Cloud Run broker, budget alert, presigned URLs
 - [ ] 5. Notebook workers (Kaggle, Colab) with the pip package
 - [ ] 6. Cloud Run Jobs GPU backend + workload identity federation to AWS
