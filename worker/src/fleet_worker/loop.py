@@ -4,15 +4,35 @@ The loop only talks to small interfaces (Broker, ResultStore, a clock), so tests
 fakes, phase 1 plugs in the HTTP broker client and phase 3 an S3 store behind presigned URLs.
 """
 
+import logging
 import time
 from collections.abc import Callable
 from typing import Literal, Protocol
 
+from .backoff import Backoff
 from .protocol import Job, Lease
+
+log = logging.getLogger(__name__)
 
 
 class LeaseLost(Exception):
     """The broker refused a heartbeat: the job may now belong to another worker. Stop, don't complete."""
+
+
+class TransientError(Exception):
+    """The broker is unreachable or failing (network error, 5xx). Wait and try again."""
+
+
+class InvalidResult(Exception):
+    """The runner's output failed validation. It is never stored, so it never gets a content
+    address and can never be served from the cache. The lease is left to expire: the job is
+    retried and the failure counts toward the dead-letter limit (ADR 0006)."""
+
+
+def require_nonempty(job: Job, data: bytes) -> None:
+    """The default validator. Real runners pass a stricter one (schema, IDs, lengths)."""
+    if not isinstance(data, bytes) or not data.strip():
+        raise InvalidResult(f"{job.job_id}: empty or non-bytes output")
 
 
 class Broker(Protocol):
@@ -46,11 +66,13 @@ class Worker:
         store: ResultStore,
         runner: Runner,
         clock: Callable[[], float] = time.monotonic,
+        validate: Callable[[Job, bytes], None] = require_nonempty,
     ) -> None:
         self.broker = broker
         self.store = store
         self.runner = runner
         self.clock = clock
+        self.validate = validate
         # the current lease; keepalive() replaces it on renewal
         self.lease: Lease | None = None
 
@@ -81,6 +103,40 @@ class Worker:
             self.broker.complete(self.lease, key)
             return "cached"
         result = self.runner(self.lease.job, self.keepalive)
+        self.validate(self.lease.job, result)  # raises InvalidResult: nothing stored or completed
         self.store.put(key, result)
         self.broker.complete(self.lease, key)
         return "ran"
+
+    def run(
+        self,
+        should_stop: Callable[[], bool] = lambda: False,
+        sleep: Callable[[float], None] = time.sleep,
+        backoff: Backoff | None = None,
+    ) -> None:
+        """Process jobs until should_stop() is true. Back off with jitter while the queue is
+        empty or the broker is failing (ADR 0008); ask again at once after real work.
+
+        Anything else (a 401, a bug) propagates: a misconfigured worker should stop loudly,
+        not retry forever.
+        """
+        backoff = backoff or Backoff()
+        while not should_stop():
+            try:
+                outcome = self.run_once()
+            except LeaseLost as e:
+                log.warning("lease lost on %s; moving on", e)
+                backoff.reset()
+                continue
+            except InvalidResult as e:
+                log.warning("invalid result, not stored: %s", e)
+                sleep(backoff.next_delay())  # a runner that always fails must not spin
+                continue
+            except TransientError as e:
+                log.warning("broker unavailable: %s", e)
+                sleep(backoff.next_delay())
+                continue
+            if outcome is None:
+                sleep(backoff.next_delay())
+            else:
+                backoff.reset()

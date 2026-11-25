@@ -13,7 +13,8 @@ updated to point to it.
 | [0005](0005-sqlite-job-store.md) | SQLite job store for the local phases; atomic claim | Accepted |
 | [0006](0006-lease-lifecycle.md) | Token is ownership; lazy expiry; dead letters; idempotent complete | Accepted |
 | [0007](0007-http-contract-and-auth.md) | HTTP status-code contract; interim bearer-token auth | Accepted |
-| [0008](0008-short-polling-with-backoff.md) | Short polling with exponential backoff and jitter | Proposed |
+| [0008](0008-short-polling-with-backoff.md) | Short polling with exponential backoff and jitter | Accepted |
 | [0009](0009-ci-supply-chain.md) | CI supply chain: SHA-pinned actions, Dependabot cooldown | Accepted |
+| [0010](0010-worker-failure-handling.md) | Worker failure handling; invalid output is never stored | Accepted |
 
 Template: Status, Date, Context, Decision, Consequences, Alternatives considered. Keep each one to a page.

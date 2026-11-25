@@ -1,6 +1,6 @@
 # 0008. Short polling with exponential backoff and jitter
 
-**Status:** Proposed (awaiting the maintainer's sign-off; implementation planned for phase 1 step 3b)
+**Status:** Accepted (maintainer, 2026-11-25). Implemented in `worker/src/fleet_worker/backoff.py` and `Worker.run()`.
 **Date:** 2026-11-25
 
 ## Context
