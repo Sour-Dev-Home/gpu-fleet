@@ -1,6 +1,6 @@
 # 0011. Broker auth hardening: admin and worker tokens, strict inputs, no public docs
 
-**Status:** Proposed (from security pass 1, 2026-11-25; awaiting the maintainer's sign-off)
+**Status:** Accepted (maintainer, 2026-11-25; from security pass 1)
 **Date:** 2026-11-25
 **Amends:** [0007](0007-http-contract-and-auth.md) (one shared token becomes two role tokens)
 
