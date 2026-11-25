@@ -1,0 +1,20 @@
+# Build context for this image (ADR 0014): it needs only pyproject.toml, uv.lock, README.md and src/.
+# Footage, results, databases and secrets never reach a build context (scripts/tests/test_dockerignore.py).
+# Patterns are anchored at the context root; the **/ forms catch nested copies too.
+.git
+.venv
+__pycache__
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+data/
+results/
+secrets/
+*.db
+*.db-*
+**/*.db
+**/*.db-*
+.private-patterns.txt
+tests/
+Dockerfile
+.dockerignore

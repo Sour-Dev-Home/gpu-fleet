@@ -31,6 +31,25 @@ def test_any_rejected_job_fails_the_command(monkeypatch):
     assert main(["--demo", "2", "--run", "x"], env={"FLEET_ADMIN_TOKEN": ADMIN}) == 1
 
 
+def posted_jobs(monkeypatch, argv):
+    jobs = []
+    monkeypatch.setattr(enqueue, "post_job", lambda url, token, job: jobs.append(job) or 201)
+    assert main(argv, env={"FLEET_ADMIN_TOKEN": ADMIN}) == 0
+    return jobs
+
+
+def test_demo_jobs_default_to_the_echo_runner_composes_default(monkeypatch):
+    jobs = posted_jobs(monkeypatch, ["--demo", "2", "--run", "x"])
+    assert {(j["model"], j["prompt_version"]) for j in jobs} == {("qwen3:8b", "echo-v1")}
+
+
+def test_prompt_version_and_model_can_be_chosen(monkeypatch):
+    # e.g. --prompt-version smoke-v1 for the smoke runner, which refuses echo-v1 jobs
+    argv = ["--demo", "2", "--run", "x", "--prompt-version", "smoke-v1", "--model", "qwen3:14b"]
+    jobs = posted_jobs(monkeypatch, argv)
+    assert {(j["model"], j["prompt_version"]) for j in jobs} == {("qwen3:14b", "smoke-v1")}
+
+
 def test_all_accepted_succeeds(monkeypatch, capsys):
     monkeypatch.setattr(enqueue, "post_job", lambda *a: 201)
     assert main(["--demo", "3", "--run", "x"], env={"FLEET_ADMIN_TOKEN": ADMIN}) == 0

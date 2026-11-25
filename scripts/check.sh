@@ -14,6 +14,22 @@ failed=0
 mode=${1:-all}
 
 if [ "$mode" = all ]; then
+  # --all-files means all TRACKED files: a new file nobody has `git add`ed yet would be
+  # skipped and reported "ok". Mark untracked (non-ignored) files intent-to-add first, so
+  # pre-commit sees them; this stages no content. NUL-separated (-z / -0) for any file name,
+  # and portable (BSD xargs has no -d).
+  # Afterwards, take those entries out again (even on Ctrl-C), so the files show as untracked
+  # and a later `git commit -a` can't pick them up. Guarded: `git reset` with no paths would
+  # unstage everything. --literal-pathspecs: git otherwise reads names as patterns, and an
+  # untracked "f[a].py" would also unstage the user's "fa.py".
+  ita=$(mktemp)
+  undo_ita() {
+    [ -s "$ita" ] && xargs -0 git --literal-pathspecs reset -q -- <"$ita"
+    rm -f "$ita"
+  }
+  trap undo_ita EXIT
+  git ls-files -z --others --exclude-standard >"$ita"
+  [ -s "$ita" ] && xargs -0 git --literal-pathspecs add --intent-to-add -- <"$ita"
   # Hooks like ruff --fix and end-of-file-fixer change files and report "Failed" once.
   # Re-run: a second failure is a real problem.
   if pre-commit run --all-files >/dev/null 2>&1 || pre-commit run --all-files; then
@@ -22,6 +38,8 @@ if [ "$mode" = all ]; then
     echo "pre-commit: FAILED"
     failed=1
   fi
+  undo_ita
+  trap - EXIT
 fi
 
 pkgs=$(git ls-files '*pyproject.toml')

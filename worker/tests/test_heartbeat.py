@@ -7,7 +7,7 @@ import time
 
 import httpx
 import pytest
-from fakes import FakeBroker, FakeStore
+from fakes import FakeBroker, FakeStore, declares
 from fleet_worker.loop import LeaseLost, TransientError, Worker
 from fleet_worker.protocol import Job, Lease
 
@@ -18,7 +18,7 @@ TTL = 0.3  # renewal due after 0.2 s
 def setup(runner, poll=0.02):
     clock, store = time.monotonic, FakeStore()
     broker = FakeBroker([Lease(JOB, "t", TTL, clock())], store, clock)
-    worker = Worker(broker, store, runner, clock, heartbeat_poll_seconds=poll)
+    worker = Worker(broker, store, declares(runner, "v1"), clock, heartbeat_poll_seconds=poll)
     return worker, broker, store
 
 

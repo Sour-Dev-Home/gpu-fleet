@@ -9,7 +9,8 @@ Status codes carry the store's answers (ADR 0007):
 Two tokens (ADR 0011): workers can only lease, heartbeat and complete; only the admin token
 can add jobs. Both come from the fleet vault, never from a file:
   ./scripts/with-secrets.ps1 -Names FLEET_WORKER_TOKEN,FLEET_ADMIN_TOKEN -- \
-      uv run --directory broker --with uvicorn uvicorn fleet_broker.app:app
+      uv run --directory broker uvicorn fleet_broker.app:app
+(or the image, with Compose: see compose.yaml).
 The database defaults to data/broker.db (git-ignored). Set FLEET_DOCS=1 to serve /docs locally.
 """
 

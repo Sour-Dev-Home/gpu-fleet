@@ -1,0 +1,65 @@
+# Local stack: one broker and N workers (ADR 0014). Tokens come only from the environment (the vault):
+#   ./scripts/with-secrets.ps1 -Names FLEET_WORKER_TOKEN,FLEET_ADMIN_TOKEN -- docker compose up
+# Add jobs matching the workers' runner (a worker stops on a job for another runner's prompt version):
+#   echo (default):     docker compose run --rm broker fleet-enqueue --demo 20   (echo-v1)
+#   FLEET_RUNNER=smoke: docker compose run --rm broker fleet-enqueue --demo 20 --prompt-version smoke-v1
+# More workers: docker compose up --scale worker=3
+# No .env or secrets files: both would put tokens on disk.
+
+services:
+  broker:
+    build: ./broker
+    image: fleet-broker:local
+    environment:
+      # ${VAR:?msg} makes Compose refuse to start when a token is missing, instead of running without auth.
+      FLEET_WORKER_TOKEN: ${FLEET_WORKER_TOKEN:?set FLEET_WORKER_TOKEN, e.g. via scripts/with-secrets.ps1}
+      FLEET_ADMIN_TOKEN: ${FLEET_ADMIN_TOKEN:?set FLEET_ADMIN_TOKEN, e.g. via scripts/with-secrets.ps1}
+      # Not used by the broker itself: lets `docker compose run --rm broker fleet-enqueue` reach the
+      # running broker by its service name.
+      FLEET_BROKER_URL: http://broker:8000
+    ports:
+      - "127.0.0.1:8000:8000" # loopback only: never exposed to the LAN
+    volumes:
+      - broker-data:/data # SQLite job store survives restarts and rebuilds
+    healthcheck:
+      # python:3.11-slim has no curl; urlopen raises (exit 1) on a refused connection or an error status.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+      start_interval: 1s
+    restart: unless-stopped # back after a crash or a Docker restart; the job store is on the volume
+
+  worker:
+    build: ./worker
+    image: fleet-worker:local
+    depends_on:
+      broker:
+        condition: service_healthy # don't start polling before the broker answers
+    environment:
+      FLEET_BROKER_URL: http://broker:8000
+      # Plain HTTP is acceptable only because this is the private Compose network.
+      FLEET_ALLOW_HTTP: "1"
+      # The worker token only; the admin token (adding jobs) stays with the broker.
+      FLEET_WORKER_TOKEN: ${FLEET_WORKER_TOKEN:?set FLEET_WORKER_TOKEN, e.g. via scripts/with-secrets.ps1}
+      # echo (echo-v1 jobs) needs no GPU; smoke (smoke-v1 jobs) asks the model server.
+      FLEET_RUNNER: ${FLEET_RUNNER:-echo}
+      # The model server (native Ollama on the host GPU) runs outside Docker, see ADR 0014.
+      FLEET_MODEL_URL: ${FLEET_MODEL_URL:-http://host.docker.internal:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # Docker Desktop has this name already; Linux Engine needs it
+    volumes:
+      - results:/results # content-addressed results, shared by every worker replica
+    # "no" until ADR 0015's capability filtering lands, then unless-stopped again. A worker stops
+    # on a job it can't run (prompt version, missing model); with unless-stopped it restarted,
+    # leased the same job again and dead-lettered it after 3 leases. Stopped, the job just waits.
+    restart: "no"
+    # Time to finish the job in hand after SIGTERM; a longer job is retried when its lease expires.
+    stop_grace_period: 30s
+    deploy:
+      replicas: 1 # docker compose up --scale worker=N for more
+
+volumes:
+  broker-data:
+  results:

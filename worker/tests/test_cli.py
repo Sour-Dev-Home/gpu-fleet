@@ -84,7 +84,7 @@ def test_echo_runner_is_deterministic():
 def test_sigterm_wakes_an_idle_worker_immediately():
     stopper = Stopper()
     clock, store = FakeClock(), FakeStore()
-    worker = Worker(FakeBroker([], store, clock), store, lambda j, k: b"x", clock)
+    worker = Worker(FakeBroker([], store, clock), store, echo, clock)
     # Idle, it backs off for 30 s (pinned, no jitter). A stop must cut that short.
     long_wait = Backoff(base=30, cap=60, rng=lambda: 1.0)
     threading.Timer(0.2, stopper.handle, args=(15,)).start()

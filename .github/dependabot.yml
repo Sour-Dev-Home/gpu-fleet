@@ -1,7 +1,6 @@
 version: 2
 # Only ecosystems that have manifests: Dependabot fails ("No files found") on an empty directory.
 # Add each entry in the phase that creates its manifest:
-#   docker   -> phase 2, directory of each Dockerfile
 #   terraform -> phase 3, each Terraform root under /infra
 updates:
   - package-ecosystem: github-actions
@@ -15,3 +14,18 @@ updates:
     cooldown: { default-days: 7 } # bumps auto-merge: let a fresh release age before it can land
     groups:
       python: { patterns: ["*"] }
+  - package-ecosystem: docker # base image digests in each Dockerfile (ADR 0014)
+    directories: [/worker, /broker]
+    schedule: { interval: weekly }
+    cooldown: { default-days: 7 }
+    groups:
+      docker: { patterns: ["*"] }
+    ignore:
+      # Digest bumps only (ADR 0014 amendment). python: no new minor or major, so the image
+      # stays on 3.11, the version CI tests.
+      - dependency-name: python
+        update-types: [version-update:semver-major, version-update:semver-minor]
+      # uv: no version updates, since ci.yml pins it separately (pip install uv==0.13.10);
+      # bump both together by hand.
+      - dependency-name: "*astral-sh/uv"
+        update-types: [version-update:semver-major, version-update:semver-minor, version-update:semver-patch]

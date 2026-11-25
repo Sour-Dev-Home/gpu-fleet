@@ -1,6 +1,6 @@
 import httpx
 import pytest
-from fakes import FakeBroker, FakeClock, FakeStore
+from fakes import FakeBroker, FakeClock, FakeStore, declares
 from fleet_worker.backoff import Backoff
 from fleet_worker.http_broker import HttpBroker
 from fleet_worker.loop import InvalidResult, LeaseLost, TransientError, Worker
@@ -42,7 +42,7 @@ def test_backoff_survives_a_very_long_outage():
 def make(leases, runner=lambda job, keepalive: b"ok"):
     clock, store = FakeClock(), FakeStore()
     broker = FakeBroker(leases, store, clock)
-    return Worker(broker, store, runner, clock), broker, store
+    return Worker(broker, store, declares(runner, "v1"), clock), broker, store
 
 
 def lease_for(job: Job = JOB) -> Lease:
