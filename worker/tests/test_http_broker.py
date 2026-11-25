@@ -23,7 +23,7 @@ def broker(responses: dict[str, httpx.Response], clock: FakeClock) -> HttpBroker
         return responses[request.url.path]
 
     client = httpx.Client(base_url="http://broker", transport=httpx.MockTransport(handler))
-    return HttpBroker(client, clock=clock)
+    return HttpBroker(client, clock=clock, allow_http=True)
 
 
 def a_lease(received_at: float) -> Lease:
@@ -63,3 +63,27 @@ def test_other_errors_are_not_mistaken_for_lease_lost():
     b = broker({"/heartbeat": httpx.Response(401)}, clock)
     with pytest.raises(httpx.HTTPStatusError):
         b.heartbeat(a_lease(received_at=1000.0))
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["http://broker.example.com", "http://10.0.0.5:8000", "http://127.0.0.1.evil.com"],
+)
+def test_refuses_to_send_the_token_over_plain_http_to_a_remote_host(url):
+    with pytest.raises(ValueError, match="refusing"):
+        HttpBroker(httpx.Client(base_url=url))
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://broker.example.com",
+        "http://127.0.0.1:8000",
+        "http://127.0.0.2:8000",
+        "http://localhost:8000",
+        "http://[::1]:8000",
+        "http://[0:0:0:0:0:0:0:1]:8000",
+    ],
+)
+def test_https_and_loopback_are_allowed(url):
+    HttpBroker(httpx.Client(base_url=url))

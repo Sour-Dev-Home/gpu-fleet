@@ -32,6 +32,14 @@ Syncthing-backed folder plus a USB copy (you own the backups).
   remote backend (phase 3), never in git.
 - The vault locks after 15 minutes; `Unlock-SecretStore` to unlock early. Exam tie-in: same idea as Secrets Manager /
   Parameter Store, but local and free.
+- Broker tokens (ADR 0011): two random, different tokens, generated straight into the vault so you never see them:
+  ```powershell
+  foreach ($n in 'FLEET_WORKER_TOKEN','FLEET_ADMIN_TOKEN') {
+    Set-Secret -Vault fleet -Name $n -Secret ([Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)))
+  }
+  ./scripts/with-secrets.ps1 -Names FLEET_WORKER_TOKEN,FLEET_ADMIN_TOKEN -- uv run --directory broker --with uvicorn uvicorn fleet_broker.app:app
+  ```
+  Workers get only the worker token. To rotate, generate a new one the same way and restart the broker and workers.
 
 ## sops + age (step 3)
 - Your age private key: `%APPDATA%\sops\age\keys.txt` (only your user can read it). **Back it up** in a password
