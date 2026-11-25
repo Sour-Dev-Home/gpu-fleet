@@ -1,0 +1,25 @@
+{
+  "outputStyle": "Learning",
+  "permissions": {
+    "ask": [
+      "Bash(terraform apply:*)",
+      "Bash(terraform destroy:*)",
+      "Bash(kubectl delete:*)",
+      "Bash(helm uninstall:*)",
+      "Bash(aws s3 rm:*)",
+      "Bash(aws iam:*)",
+      "Bash(gcloud projects delete:*)",
+      "Bash(gcloud iam:*)",
+      "Bash(git push --force:*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./**/*.tfvars)",
+      "Read(./**/*.tfstate)",
+      "Read(./**/*.pem)",
+      "Read(./.private-patterns.txt)",
+      "Read(./**/keys.txt)"
+    ]
+  }
+}
