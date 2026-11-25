@@ -6,8 +6,9 @@
 - [x] 0. Repo, worker skeleton, the job protocol, tests (Python packaging, protocol design); Dependabot uv entry
 - [x] 1. Broker API locally: leases, heartbeats, retries (at-least-once delivery, idempotency)
 - [x] 2. Docker images for worker and broker; compose locally; Dependabot docker entry
-- [ ] 3. Data class, clearance and capabilities in the claim first (ADR 0015, the docs/security.md gate); then
-      Terraform for AWS: S3 bucket, IAM, remote state; Dependabot terraform entry
+- [x] 3. Data class, clearance and capabilities in the claim first (ADR 0015, the docs/security.md gate); then
+      Terraform for AWS: state and results buckets, remote state, adopted budget; Dependabot terraform entry
+      (ADR 0017; the broker's IAM role moved to phase 4, its first user)
 - [ ] 3b. Observability (ADR 0018): OpenTelemetry metrics, logs and traces; local Grafana LGTM stack as a
       Compose profile; dashboard, two alerts and an SLO as code
 - [ ] 4. Terraform for Google Cloud: Cloud Run broker, budget alert, presigned URLs; close the "before phase 4"

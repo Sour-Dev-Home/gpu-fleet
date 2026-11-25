@@ -125,3 +125,37 @@ and `scripts/fleet-demo.ps1` for timed runs. ADRs 0014 (with an amendment) and 0
 RX 9070 3.9 s, smoke x3 2.5 s (16-token jobs, so the run measures polling, not the GPU). Before the thread fix
 18 of 500 enqueues failed; after, 0 of 500. Stress repro: 3-9 lock errors per run in rollback mode, 0-1 in WAL.
 Tests: broker 82, worker 86, scripts 20. Checkpoint: 2 of 4 answered with help.
+
+## Phase 3: data class in the claim; Terraform for AWS (2026-11-25)
+
+**Built:** ADR 0015's data class, clearance and capabilities in the atomic lease claim. Two Terraform stacks:
+`bootstrap` (local state) creates the versioned, TLS-1.2-only state bucket; `fleet` keeps its state there with
+`use_lockfile`, creates the results bucket through a `private-bucket` module, and adopts the console budget by
+import. CI adds tflint (checksum-verified download); Dependabot gets a terraform entry. ADRs 0017 and 0018
+(observability, planned as phase 3b).
+
+**Learned:**
+- State is Terraform's memory. Lose it and Terraform recreates everything; `import` adopts what exists.
+  The state bucket can't come from the stack that stores state in it, so a bootstrap stack breaks the loop.
+- Without a lock, two applies both read state N and the second write erases the first: a lost update, the
+  same race the broker's atomic claim prevents. `use_lockfile` makes the second run wait or fail.
+- Read the plan, not the code: every diff line needs a reason before apply. The import showed `1 to change`;
+  one part was real (`billing_view_arn -> null`), three blocks only looked changed because a sensitive value
+  hides them. Comparing `before == after` in `terraform show -json`, printing no values, told them apart.
+- Explicit Deny beats any Allow, so the bucket policy can deny `Principal: *` over plain HTTP and old TLS,
+  admin included.
+- `sensitive = true` hides values in output only; plan files and state store them in plain text.
+- `plan -out` then `apply tfplan` makes the reviewed plan the applied plan.
+- Modules make settings that can't drift: callers choose a name and versioning, never public access.
+
+**Surprises:**
+- `aws login` credentials work directly with the Terraform AWS provider.
+- PowerShell splits `-out=tfplan.x` at the dot: quote such arguments.
+- Generated import config copies computed attributes (`arn`, `id`, `name_prefix`) and fails its first plan.
+- A plan shows an unset nested number as `days = 0`; the provider leaves it out of the API call.
+- trivy ignores attach to the resource a finding belongs to (the KMS one sits on the encryption resource).
+- tflint's first run found a module without `required_version`, which `validate` can't see.
+
+**Numbers:** 2 stacks, 17 managed resources: 8 bootstrap, 8 fleet, and 1 imported budget. Cost: a few
+cents a month of S3 storage and requests, within credits. Final plan: "No changes." Tests: broker 125,
+worker 94, scripts 21. Checkpoint: 2 of 4 right, 1 partly, 1 explained.
