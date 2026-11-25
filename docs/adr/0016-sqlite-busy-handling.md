@@ -11,6 +11,12 @@ journal makes readers and writers block each other. A waiter polls for the lock 
 more than 5 s, so `sqlite3.OperationalError: database is locked` escapes and FastAPI turns it into a 500.
 A stress repro (2000 operations, many threads) gave 3-9 lock errors per run in rollback mode, 0-1 in WAL.
 
+A second cause showed up while building this, and was probably behind most of the original 500s: FastAPI
+runs a sync dependency's setup and teardown on different pool threads, so `close()` sometimes ran on a
+thread other than the one that opened the connection, and sqlite3 raised `ProgrammingError` (18 of 500
+requests in a Compose run). Fixed with `check_same_thread=False`: each connection is still used by one
+request at a time, only handed between threads. It's a bug fix, not a decision, so it isn't listed below.
+
 ## Decision
 
 1. The job store runs in `journal_mode=WAL`, set once at startup in `create_app` (the mode persists in
