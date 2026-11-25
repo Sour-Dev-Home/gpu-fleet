@@ -53,9 +53,8 @@ class Lease:
     job: Job
     lease_token: str  # proves to the broker that this worker holds the lease (heartbeat, complete)
     ttl_seconds: float
-    received_at: (
-        float  # time.monotonic() on this worker when the lease was granted or renewed
-    )
+    # time.monotonic() on this worker when the lease was granted or renewed
+    received_at: float
 
     @property
     def expires_at(self) -> float:
