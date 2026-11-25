@@ -16,7 +16,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
       - name: pre-commit (secrets, private info, lint, fmt)
         run: pip install pre-commit && pre-commit run --all-files --show-diff-on-failure
       - name: Terraform validate (each root with .tf files)
