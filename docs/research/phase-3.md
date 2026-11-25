@@ -22,5 +22,14 @@ shown; budget alerts already exist. **The plan closes around late January 2027.*
 credits run out, so nothing in AWS may be the only copy of anything (Terraform state included: the code
 recreates it; results are content-addressed and recomputable).
 
+**Upgrading Free → Paid (decided Q19: do it in early January 2027).** Sources:
+https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/free-tier-plans.html, https://aws.amazon.com/free/faqs/
+- Remaining credits carry over: "Any remaining credits from your free account plan are automatically applied to
+  future AWS bills." Credits expire 12 months after account creation.
+- No upgrade fee found; usage beyond the credits is pay-as-you-go. **Not reversible**: "you cannot downgrade your
+  Paid plan to the Free plan."
+- If not upgraded: the account closes; AWS keeps content 90 days, during which upgrading reopens it.
+- [NEEDS VERIFICATION]: S3 always-free limits; IAM and STS (`AssumeRoleWithWebIdentity`) on the Free plan.
+
 Not checked: the Google side (minting a Cloud Run ID token with a chosen audience; the `sub` value), the current
 latest Terraform release, current S3 free-tier numbers.
