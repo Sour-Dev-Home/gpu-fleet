@@ -23,6 +23,13 @@ build-backend = "hatchling.build"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
+filterwarnings = [
+    # Starlette 1.2+ prefers httpx2 in TestClient. Not adopted yet: the worker's HttpBroker
+    # is built on httpx (catches httpx.TransportError), and the e2e tests hand it a
+    # TestClient, so switching means moving the worker too. No removal date announced.
+    # Revisit with an ADR when Starlette drops httpx or the worker migrates.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning",
+]
 
 [tool.uv.sources]
 # the worker package, for end-to-end tests of the real loop against this broker
