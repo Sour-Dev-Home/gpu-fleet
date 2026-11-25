@@ -18,12 +18,18 @@ import uuid
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 
+from . import jsonlog
 from .store import Claim, Completion, JobStore, QueueStats
 
 log = logging.getLogger("fleet_broker")
 
 # Turnaround bucket edges, in seconds. The SLO threshold (15 minutes, ADR 0018) must be an edge,
 # or "share of jobs done within 900 s" can only be estimated between two edges.
+# Label values of fleet.jobs: 5 x 3 = 15 series, always all reported. Kept equal to the store's
+# states (plus 'expired', see QueueStats) and app.DATA_CLASSES by tests/test_telemetry.py.
+JOB_STATES = ("queued", "leased", "expired", "done", "dead")
+DATA_CLASSES = ("footage", "derived", "open")
+
 TURNAROUND_BUCKETS = (1, 5, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200)
 
 
@@ -52,8 +58,12 @@ class OtelMetrics(Metrics):
 
         def jobs(_options) -> Iterable[Observation]:
             _, s = stats()
-            for (state, data_class), n in s.counts.items():
-                yield Observation(n, {"state": state, "data_class": data_class})
+            # Every combination, zeros included: a series that stops reporting isn't read as 0.
+            # Prometheus keeps showing its last value for 5 minutes ("20 queued" after all 20 ran).
+            for state in JOB_STATES:
+                for data_class in DATA_CLASSES:
+                    n = s.counts.get((state, data_class), 0)
+                    yield Observation(n, {"state": state, "data_class": data_class})
 
         def oldest_age(_options) -> Iterable[Observation]:
             now, s = stats()
@@ -284,6 +294,22 @@ def trace_app(
         app, tracer_provider=provider, exclude_spans=["receive", "send"]
     )
     return provider.shutdown
+
+
+def export_logs(env: Mapping[str, str] = os.environ) -> Callable[[], None]:
+    """Also send log records to the collector (Loki), allowlisted like the JSON lines. Returns a
+    flush. Off under the same conditions as the metrics and traces."""
+    if env.get("OTEL_SDK_DISABLED", "").strip().lower() == "true":
+        return lambda: None
+    if not env.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+        return lambda: None
+    base = check_endpoint(env)
+    try:
+        handler, flush = jsonlog.otel_handler(env.get("OTEL_SERVICE_NAME", "fleet-broker"), base)
+    except ImportError:
+        return lambda: None
+    logging.getLogger().addHandler(handler)
+    return flush
 
 
 def metrics_endpoint(env: Mapping[str, str]) -> str:

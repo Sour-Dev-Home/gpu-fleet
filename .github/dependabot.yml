@@ -21,6 +21,12 @@ updates:
     cooldown: { default-days: 7 } # let a fresh release age before a bump is proposed
     groups:
       python: { patterns: ["*"] }
+  - package-ecosystem: docker-compose # image digests in compose files (grafana/otel-lgtm, ADR 0018)
+    directory: /
+    schedule: { interval: weekly }
+    cooldown: { default-days: 7 }
+    groups:
+      compose: { patterns: ["*"] }
   - package-ecosystem: docker # base image digests in each Dockerfile (ADR 0014)
     directories: [/worker, /broker]
     schedule: { interval: weekly }

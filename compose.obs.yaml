@@ -1,0 +1,41 @@
+# Observability (ADR 0018): the local stack plus Grafana's all-in-one OTel backend.
+#   ./scripts/with-secrets.ps1 -Names FLEET_WORKER_TOKEN,FLEET_ADMIN_TOKEN -- docker compose -f compose.yaml -f compose.obs.yaml up
+# Grafana: http://127.0.0.1:3000 (admin / admin; loopback only). Explore -> Tempo for traces,
+# Loki for logs, Prometheus for metrics.
+# An override file rather than a profile: it adds the collector AND points the broker and workers at
+# it, in one command. Without this file nothing is exported.
+
+services:
+  lgtm:
+    # Collector, Prometheus, Loki, Tempo, Pyroscope and Grafana in one image: built for development
+    # and demos, not production (docs/research/phase-3b.md). 3.8 GB; runs as root, so it stays local.
+    image: grafana/otel-lgtm:0.41.1@sha256:1b852b77d7bcadb7699bfe7c78a51d059dff85168de674728cf7abf4474645e5
+    environment:
+      # The image's start script turns on anonymous access as Admin; then any local process, or a
+      # web page in your browser, could reach 127.0.0.1:3000 as an admin. Require the login.
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    ports:
+      - "127.0.0.1:3000:3000" # Grafana UI, loopback only. OTLP (4318) has no host port: only the
+                              # Compose network can send telemetry to it.
+    volumes:
+      - lgtm-data:/data # metrics, logs and traces survive `compose down` (not `down -v`)
+    restart: unless-stopped
+
+  broker:
+    depends_on:
+      lgtm:
+        condition: service_started # exports retry in the background; no need to wait for health
+    environment: &otel
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://lgtm:4318
+      # Plain http, allowed only because the Compose network is private (ADR 0018).
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
+      OTEL_METRIC_EXPORT_INTERVAL: "15000" # ms; the SDK default is 60 s, too slow to watch live
+
+  worker:
+    depends_on:
+      lgtm:
+        condition: service_started
+    environment: *otel
+
+volumes:
+  lgtm-data:

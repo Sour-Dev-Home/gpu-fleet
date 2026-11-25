@@ -47,6 +47,33 @@ def test_exceptions_are_one_line_of_json(capture):
     assert "ValueError: boom" in entry["exception"]
 
 
+def test_request_urls_are_not_logged(capture):
+    # A presigned URL's query string is a credential; idle polls would also flood the log.
+    logging.getLogger("httpx").info(
+        'HTTP Request: PUT https://s3.example/k?X-Amz-Signature=abc "200"'
+    )
+    logging.getLogger("httpx").warning("retrying")
+    assert [e["message"] for e in capture()] == ["retrying"]
+
+
+def test_otlp_logs_keep_only_the_allowed_extras():
+    from opentelemetry.sdk._logs.export import InMemoryLogRecordExporter
+
+    exported = InMemoryLogRecordExporter()
+    handler, flush = jsonlog.otel_handler("fleet-worker", exporter=exported)
+    log = logging.getLogger("otel-test")
+    log.addHandler(handler)
+    try:
+        log.warning("done", extra={"job_id": "j1", "input": "secret text"})
+    finally:
+        log.removeHandler(handler)
+        flush()
+    (record,) = exported.get_finished_logs()
+    attributes = dict(record.log_record.attributes)
+    assert attributes == {"job_id": "j1"}  # no "input", no code.file.path (an install path)
+    assert record.log_record.body == "done"
+
+
 def test_setup_replaces_earlier_handlers(capture):
     # uvicorn installs its own plain-text handlers; after setup they forward to the JSON one.
     access = logging.getLogger("uvicorn.access")

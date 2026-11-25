@@ -11,7 +11,8 @@ The broker becomes public in phase 4, so whatever exposes telemetry must not exp
 ## Decision
 - **OpenTelemetry** for all three signals. The code instruments once; where data goes is configuration.
 - **Local backend:** the `grafana/otel-lgtm` image (OTel collector, Prometheus, Loki, Tempo, Grafana) as an
-  opt-in Compose profile, `docker compose --profile obs up`. [Image name and contents verified at build time.]
+  opt-in Compose override file, `docker compose -f compose.yaml -f compose.obs.yaml up` (built as an override,
+  not a profile: a profile can add the collector but not point the broker and workers at it).
 - **Metrics:** jobs by state and data class; age of the oldest queued job; lease expiries; dead letters; 503s;
   job duration (histogram) by model and prompt version; model tokens per second; cache hits.
 - **Traces and logs:** one trace per job attempt (lease, run, model call, store, complete). Logs are structured

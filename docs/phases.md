@@ -10,7 +10,7 @@
       Terraform for AWS: state and results buckets, remote state, adopted budget; Dependabot terraform entry
       (ADR 0017; the broker's IAM role moved to phase 4, its first user)
 - [ ] 3b. Observability (ADR 0018): OpenTelemetry metrics, logs and traces; local Grafana LGTM stack as a
-      Compose profile; dashboard, two alerts and an SLO as code
+      Compose override (compose.obs.yaml); dashboard, two alerts and an SLO as code
 - [ ] 4. Terraform for Google Cloud: Cloud Run broker, budget alert, presigned URLs; close the "before phase 4"
       items in docs/security.md and re-run the security review first
 - [ ] 5. Notebook workers (Kaggle, Colab) with the pip package
