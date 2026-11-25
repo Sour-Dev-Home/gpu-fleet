@@ -6,7 +6,7 @@ from dataclasses import replace
 
 import httpx
 
-from .loop import LeaseLost
+from .loop import LeaseLost, TransientError
 from .protocol import Job, Lease
 
 
@@ -23,12 +23,23 @@ class HttpBroker:
         self.client = client
         self.clock = clock
 
+    def _post(self, path: str, **kwargs) -> httpx.Response:
+        """POST, turning "the broker is down or failing" into TransientError (retry later).
+        4xx answers are returned as they are: they mean something specific (ADR 0007)."""
+        try:
+            r = self.client.post(path, **kwargs)
+        except httpx.TransportError as e:  # connection refused, timeout, DNS, reset
+            raise TransientError(f"{path}: {e!r}") from e
+        if r.status_code >= 500:
+            raise TransientError(f"{path}: HTTP {r.status_code}")
+        return r
+
     def lease(self) -> Lease | None:
         # Stamp BEFORE sending. The broker starts the TTL when it handles the request,
         # which is after this moment, so the worker's idea of the expiry is never later
         # than the broker's. Stamping on arrival would err the unsafe way by a round trip.
         sent_at = self.clock()
-        r = self.client.post("/lease")
+        r = self._post("/lease")
         if r.status_code == 204:
             return None
         r.raise_for_status()
@@ -38,7 +49,7 @@ class HttpBroker:
 
     def heartbeat(self, lease: Lease) -> Lease:
         sent_at = self.clock()
-        r = self.client.post(
+        r = self._post(
             "/heartbeat",
             json={"job_id": lease.job.job_id, "lease_token": lease.lease_token},
         )
@@ -49,7 +60,7 @@ class HttpBroker:
         return replace(lease, ttl_seconds=r.json()["ttl_seconds"], received_at=sent_at)
 
     def complete(self, lease: Lease, result_key: str) -> None:
-        r = self.client.post(
+        r = self._post(
             "/complete",
             json={
                 "job_id": lease.job.job_id,
