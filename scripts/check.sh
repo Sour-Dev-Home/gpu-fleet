@@ -14,6 +14,11 @@ failed=0
 mode=${1:-all}
 
 if [ "$mode" = all ]; then
+  # --all-files means all TRACKED files: a new file nobody has `git add`ed yet would be
+  # skipped and reported "ok". Mark untracked (non-ignored) files intent-to-add first, so
+  # pre-commit sees them; this stages no content.
+  untracked=$(git ls-files --others --exclude-standard)
+  [ -z "$untracked" ] || printf '%s\n' "$untracked" | xargs -d '\n' git add --intent-to-add --
   # Hooks like ruff --fix and end-of-file-fixer change files and report "Failed" once.
   # Re-run: a second failure is a real problem.
   if pre-commit run --all-files >/dev/null 2>&1 || pre-commit run --all-files; then
