@@ -60,7 +60,13 @@ Approved by the maintainer after the phase 2b-2 review.
   (a prompt-version mismatch, or a model the model server lacks, which `smoke` now also stops on) was restarted,
   leased the same job again and dead-lettered it after 3 leases. The worker returns to `unless-stopped` once
   ADR 0015's capability filtering lands, because then the broker won't lease it such jobs.
-  **2026-11-25: done.** ADR 0015 is implemented, so the worker is back to `restart: unless-stopped`.
+  **2026-11-25: done, with a cap.** ADR 0015 is implemented, so a mismatch can no longer loop. But a runner
+  that crashes on every job (a model server answering 404 behind a proxy, a bug) still would under
+  `unless-stopped`: each crash leaves a lease that expires and burns an attempt, and each restart leases a new
+  job. The worker uses `restart: on-failure:3`: at most one burned attempt on each of three jobs, which can't
+  dead-letter any of them, then it stays down for a person to look at. The worker's prompt-version guard is now
+  a backstop: the broker already filters by capability. Backlog: a "release lease" call so a fatal runner error
+  returns the job without counting the attempt.
 
 ## Consequences
 - One small worker image serves every backend. Changing GPU vendor or model server never rebuilds it.

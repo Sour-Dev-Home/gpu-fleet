@@ -34,6 +34,10 @@ They fail differently: a false capability wastes work; a false clearance leaks f
   mutation checks.
 - Old workers that don't send capabilities fail loudly (422). All workers are the maintainer's until phase 10, so
   they're upgraded together.
+- A smoke worker declares every model its model server lists, so pulling a new model makes the worker eligible
+  for its jobs without reconfiguring it.
+- Known limit: one worker token, so one clearance for every worker. Volunteers (`open` only) need per-worker
+  tokens, each with its own clearance, before any volunteer joins (the phase 10 gate in docs/security.md).
 
 ## Alternatives considered
 - **One `job_class` field for both questions:** it can't express "trusted, but only runs smoke-v1", and it makes

@@ -58,6 +58,7 @@ def fleet(tmp_path):
     def worker(runner) -> Worker:
         # TestClient's base URL is http://testserver, an in-process app with no network
         runner.prompt_versions = frozenset({"v1"})  # the version add() gives every job
+        runner.models = frozenset({"m"})
         return Worker(
             HttpBroker(http, {"v1"}, {"m"}, clock=clock, allow_http=True), store, runner, clock
         )
@@ -153,6 +154,7 @@ def test_context_reaches_the_worker_and_keys_its_result(tmp_path):
         return b"description"
 
     runner.prompt_versions = frozenset({"v1"})
+    runner.models = frozenset({"m"})
     Worker(
         HttpBroker(http, {"v1"}, {"m"}, clock=clock, allow_http=True), store, runner, clock
     ).run_once()

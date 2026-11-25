@@ -17,5 +17,10 @@ means no fetched source supports it: check before relying on it.
 | ✔ AWS provider | 6.x; 6.74.0 published 2026-11-23. | registry.terraform.io (re-checked) |
 | Minimum Terraform for provider 6.x | [NEEDS VERIFICATION] | — |
 
+**The maintainer's account (2026-11-25, from the Billing console):** Free plan with credits; low free usage
+shown; budget alerts already exist. **The plan closes around late January 2027.** Consequence: a Free-plan account closes 6 months after creation or when
+credits run out, so nothing in AWS may be the only copy of anything (Terraform state included: the code
+recreates it; results are content-addressed and recomputable).
+
 Not checked: the Google side (minting a Cloud Run ID token with a chosen audience; the `sub` value), the current
 latest Terraform release, current S3 free-tier numbers.

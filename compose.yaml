@@ -54,9 +54,10 @@ services:
       - "host.docker.internal:host-gateway" # Docker Desktop has this name already; Linux Engine needs it
     volumes:
       - results:/results # content-addressed results, shared by every worker replica
-    # ADR 0015: the broker only leases jobs this worker declared it can run (prompt version, model), so
-    # a restart can't lease an unrunnable job again; such jobs wait in the queue.
-    restart: unless-stopped
+    # ADR 0015: the broker only leases jobs this worker declared it can run, so a mismatch can't loop.
+    # A runner that crashes on every job still could (each crash burns an attempt on a new lease), so
+    # restarts are capped: 3 restarts can't dead-letter any job, then the worker stays down (ADR 0014).
+    restart: on-failure:3
     # Time to finish the job in hand after SIGTERM; a longer job is retried when its lease expires.
     stop_grace_period: 30s
     deploy:

@@ -92,6 +92,8 @@ class Worker:
     ) -> None:
         if not isinstance(getattr(runner, "prompt_versions", None), frozenset):
             raise TypeError(f"runner {runner!r} must declare prompt_versions (a frozenset)")
+        if not isinstance(getattr(runner, "models", None), frozenset):
+            raise TypeError(f"runner {runner!r} must declare models (a frozenset)")
         self.broker = broker
         self.store = store
         self.runner = runner
