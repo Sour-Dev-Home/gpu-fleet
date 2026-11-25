@@ -16,9 +16,13 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false # tests run PR code; keep the job token out of .git/config
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: "3.12"
+          python-version: | # 3.11: oldest supported (package tests); last one listed is the default (pre-commit)
+            3.11
+            3.12
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
       - name: pre-commit (secrets, private info, lint, fmt)
         run: pip install pre-commit==4.7.0 && pre-commit run --all-files --show-diff-on-failure
@@ -40,6 +44,13 @@ jobs:
         uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
         with:
           recursive: true
-      - name: Python tests
+      - name: Python tests (each package with a pyproject.toml, on the oldest supported Python)
         run: |
-          if [ -f pyproject.toml ]; then pip install uv==0.13.10 && uv sync && uv run pytest -q; fi
+          pip install uv==0.13.10
+          export UV_PYTHON_DOWNLOADS=never # use setup-python's 3.11; fail loudly if missing
+          pkgs=$(git ls-files '*pyproject.toml')
+          [ -n "$pkgs" ] || { echo "no pyproject.toml found: nothing tested" >&2; exit 1; }
+          for p in $pkgs; do
+            d=$(dirname "$p")
+            (cd "$d" && uv sync --locked --python 3.11 && uv run --locked --python 3.11 pytest -q)
+          done

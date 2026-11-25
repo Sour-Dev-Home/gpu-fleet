@@ -1,0 +1,20 @@
+[project]
+name = "fleet-worker"
+version = "0.0.1"
+description = "Fleet worker: leases jobs from the broker, runs them, uploads content-addressed results"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+# 3.11: oldest Python on the notebook backends (Kaggle, Colab) the worker must run on
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
