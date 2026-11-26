@@ -6,7 +6,8 @@ cutscene audio descriptions for the Metaphor: ReFantazio accessibility mod
 ([#1013](https://github.com/Sour-Dev-Home/metaphor-accessibility/issues/1013),
 [#1025](https://github.com/Sour-Dev-Home/metaphor-accessibility/issues/1025)).
 
-Built as a learning project, phase by phase: see [docs/phases.md](docs/phases.md).
+Built as a learning project, phase by phase: see [docs/phases.md](docs/phases.md). The design decisions, by theme, are in
+[docs/decisions.md](docs/decisions.md).
 
 ## Run it locally
 
