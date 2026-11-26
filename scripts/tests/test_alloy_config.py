@@ -253,7 +253,7 @@ def test_docs_mention_the_installer_and_the_vault_names():
 
 def test_service_runs_a_protected_copy_of_the_config_not_the_repo_file():
     code = strip_ps(SETUP.read_text(encoding="utf-8"))
-    assert re.search(r"Copy-Item[^\n]*\$config\b[^\n]*\$configCopy", code) or "Copy-Item" in code
+    assert re.search(r"Copy-Item[^\n]*\$config\b[^\n]*\$configCopy", code)
     assert re.search(r"\$configCopy\s*=\s*Join-Path\s+\$dir\s+'config\.alloy'", code)
     # the `run` argument is the copy in the protected directory, never the repo path
     assert re.search(r"\$arguments\s*=\s*@\('run',\s*\$configCopy\)", code)
@@ -267,6 +267,18 @@ def test_setup_takes_ownership_and_refuses_reparse_points():
     assert "ReparsePoint" in code
     assert re.search(r"(?i)throw[^\n]*(reparse|symbolic|junction|link)", code)
     assert re.search(r"\$acl\.SetOwner\(\$admins\)", code)
+
+
+def test_setup_locks_the_parent_folder_and_recreates_the_token_file():
+    # A user who owns %ProgramData%\fleet could rename `alloy` and plant a config the SYSTEM service runs;
+    # a reused token file keeps any handle a user opened on it before the ACL change.
+    code = strip_ps(SETUP.read_text(encoding="utf-8"))
+    assert re.search(r"\$parent\s*=\s*Join-Path\s+\$env:ProgramData\s+'fleet'", code)
+    assert re.search(r"foreach \(\$path in @\(\$parent, \$dir, \$tokenFile\)\)", code)
+    assert re.search(r"Assert-NotReparsePoint \$parent", code)
+    assert re.search(r"Remove-Item -LiteralPath \$tokenFile", code)
+    assert code.index("Remove-Item -LiteralPath $tokenFile") < code.index("Set-Acl")
+    assert "SilentlyContinue" not in code.split("Copy-Item")[0].split("Set-Acl")[-1]
     assert code.index("SetOwner") < code.index("Set-Acl")
     # the reparse check comes before any ACL is changed or the token written
     assert code.index("ReparsePoint") < code.index("SetOwner")

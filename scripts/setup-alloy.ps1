@@ -51,7 +51,8 @@ if ($url -notmatch '^https://') { throw 'FLEET_GRAFANA_OTLP_URL must be an https
 if ($instanceId -notmatch '^[0-9]+$') { throw 'FLEET_GRAFANA_INSTANCE_ID must be the numeric instance ID.' }
 
 # 1. The token file: create it empty, lock it, THEN write. SIDs, so a localized Windows works.
-$dir = Join-Path $env:ProgramData 'fleet\alloy'
+$parent = Join-Path $env:ProgramData 'fleet'
+$dir = Join-Path $parent 'alloy'
 New-Item -ItemType Directory -Force $dir | Out-Null
 $tokenFile = Join-Path $dir 'grafana-token'
 $configCopy = Join-Path $dir 'config.alloy'
@@ -64,13 +65,17 @@ function Assert-NotReparsePoint([string]$Path) {
     }
   }
 }
+# The parent too: Users may create folders in ProgramData, and whoever owns `fleet` could later rename
+# `alloy` and put their own config where the SYSTEM service looks.
+Assert-NotReparsePoint $parent
 Assert-NotReparsePoint $dir
-if (-not (Test-Path $tokenFile)) { New-Item -ItemType File $tokenFile | Out-Null }
-Assert-NotReparsePoint $tokenFile
+# Recreated, never reused: a handle a user opened on a pre-planted file would survive the ACL change.
+if (Test-Path -LiteralPath $tokenFile) { Assert-NotReparsePoint $tokenFile; Remove-Item -LiteralPath $tokenFile -Force }
+New-Item -ItemType File $tokenFile | Out-Null
 Assert-NotReparsePoint $configCopy
 $system = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
 $admins = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
-foreach ($path in @($dir, $tokenFile)) {
+foreach ($path in @($parent, $dir, $tokenFile)) {
   $acl = Get-Acl $path
   $acl.SetOwner($admins)                        # a pre-planted object may be owned by a user, who could undo the ACL
   $acl.SetAccessRuleProtection($true, $false)   # inheritance off, inherited rules dropped
@@ -84,7 +89,7 @@ foreach ($path in @($dir, $tokenFile)) {
 # The SYSTEM service must not run a file a user can edit: it runs this COPY, in the protected directory
 # (the ACL above is already in place). Re-running this script refreshes the copy from the repo file.
 # A pre-existing copy is deleted first, so the new file takes the directory's ACL and owner.
-Remove-Item -LiteralPath $configCopy -Force -ErrorAction SilentlyContinue
+if (Test-Path -LiteralPath $configCopy) { Remove-Item -LiteralPath $configCopy -Force }  # a failed delete stops here
 Copy-Item -LiteralPath $config -Destination $configCopy
 $token = Get-Secret -Name FLEET_GRAFANA_TOKEN_PC_ALLOY -Vault fleet -AsPlainText
 # No trailing newline and no BOM: Alloy would send both as part of the password.
