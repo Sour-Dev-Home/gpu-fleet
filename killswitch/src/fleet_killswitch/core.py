@@ -24,6 +24,7 @@ from google.api_core import exceptions as gexc
 INVOKER = "roles/run.invoker"
 PUBLIC = "allUsers"
 MAX_AGE_S = 3600  # replay window for the flood alert's started_at (ADR 0028)
+MAX_SKEW_S = 300  # clock skew allowed for a started_at in the future
 
 
 class Iam(Protocol):
@@ -97,13 +98,14 @@ def parse_alert(body: bytes) -> tuple[str, str, object] | None:
 
 
 def _fresh(started_at: object, now: float) -> bool:
-    """True if started_at (epoch seconds) is a real number no more than MAX_AGE_S in the past.
-    Anything undatable (missing, bool, string, NaN) is not fresh."""
+    """True if started_at (epoch seconds) is a real number no more than MAX_AGE_S in the past and no more than
+    MAX_SKEW_S in the future. Anything undatable (missing, bool, string, NaN) is not fresh, and neither is a
+    far-future date, which would otherwise stay "fresh" forever."""
     if isinstance(started_at, bool) or not isinstance(started_at, (int, float)):
         return False
     if not math.isfinite(started_at):
         return False
-    return now - started_at <= MAX_AGE_S
+    return -MAX_SKEW_S <= now - started_at <= MAX_AGE_S
 
 
 def handle_alert(

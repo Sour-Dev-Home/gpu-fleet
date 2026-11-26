@@ -41,9 +41,13 @@ directory, a default data class on `fleet-enqueue`).
    no default.
 5. **Replay guard (K4).** An open incident whose `incident.started_at` (epoch seconds) is more than 1 hour old is
    logged and acknowledged (2xx), so a redelivered old message cannot undo a manual restore of public access. An
-   undatable one (missing, not a number, NaN) is ignored the same way. This is deliberate: acting on a message
-   we cannot date risks the same undo, while ignoring it loses little, because a real flood keeps the policy
-   open and Monitoring re-notifies, and the budget path still backstops cost. The clock is injected for tests.
+   undatable one (missing, not a number, NaN), or one dated more than 5 minutes in the future, is ignored the same
+   way. This is deliberate: acting on a message we cannot date risks the same undo. Monitoring notifies once when
+   an incident opens and once when it closes; the policy sets no `renotify_interval`, and a re-notification would
+   keep the original `started_at` anyway. So an ignored real flood is caught by the next NEW incident (after the
+   current one closes and the flood re-opens it) or by the budget path, which still backstops cost. The same window
+   caps retries: if tripping fails with a 5xx, Pub/Sub redelivers, and after 1 hour the retries are ignored. The
+   clock is injected for tests.
 6. **Unknown paths return 404.** Known paths always answer 2xx on a bad message (redelivery can't fix it), but a
    path nothing handles means a misconfigured push endpoint; a 404 makes that loud (Pub/Sub retries, metrics show
    it) instead of silently acknowledging.

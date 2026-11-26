@@ -291,6 +291,15 @@ def test_k4_a_fresh_incident_fires():
     assert PUBLIC not in iam.members(INVOKER)
 
 
+def test_k4_a_far_future_incident_is_ignored_but_small_skew_fires():
+    iam = public_broker()
+    assert run_alert(alert(started_at=NOW + 301), iam) == 200
+    assert iam.gets == 0 and iam.sets == []
+    iam = public_broker()
+    assert run_alert(alert(started_at=NOW + 299), iam) == 200
+    assert PUBLIC not in iam.members(INVOKER)
+
+
 @pytest.mark.parametrize("started", [None, "soon", True, float("nan"), [1]])
 def test_k4_an_undatable_incident_is_ignored(started):
     iam = public_broker()

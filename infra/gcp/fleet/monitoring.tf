@@ -43,8 +43,9 @@ resource "google_monitoring_alert_policy" "broker_4xx" {
     display_name = "4xx responses above 5/s for 5 minutes"
 
     condition_threshold {
-      # UNVERIFIED filter syntax: written from the metric list (run.googleapis.com/request_count, label
-      # response_code_class); validate can't check it, so look at the policy in the console after apply.
+      # run.googleapis.com/request_count has the string labels response_code_class ("4xx") and response_code
+      # ("429"), checked against Google's metric list 2026-11-26. 429s are excluded: Cloud Run's no-free-instance
+      # and the broker's rate limit are load, not a flood. Validate can't check the filter; the apply does.
       filter          = "resource.type = \"cloud_run_revision\" AND resource.labels.service_name = \"fleet-broker\" AND metric.type = \"run.googleapis.com/request_count\" AND metric.labels.response_code_class = \"4xx\" AND metric.labels.response_code != \"429\""
       comparison      = "COMPARISON_GT"
       threshold_value = 5
