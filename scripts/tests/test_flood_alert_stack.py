@@ -105,6 +105,15 @@ def test_readme_has_the_flood_drill_with_a_fake_open_incident():
     text = (STACK / "README.md").read_text(encoding="utf-8")
     assert "gcloud pubsub topics publish fleet-flood" in text
     assert '"state":"open"' in text and "policy_name" in text
+    # The drill must pass the parser's checks, or it is silently ignored: version 1.2, a current started_at
+    # (the 1-hour replay window) and the policy's real display name.
+    drill = text[text.index("**Drill** (cuts public access, like the budget drill") :]
+    drill = drill[: drill.index("```", drill.index("```") + 3)]
+    assert '"version":"1.2"' in drill
+    assert re.search(r"\"started_at\":' \+ \$now", drill) and "ToUnixTimeSeconds()" in drill
+    policy = res("monitoring.tf", "google_monitoring_alert_policy", "broker_4xx")
+    name = re.search(r'display_name\s*=\s*"([^"]+)"', policy).group(1)
+    assert f'"policy_name":"{name}"' in drill
 
 
 def test_the_comment_explaining_service_level_scaling_exists():

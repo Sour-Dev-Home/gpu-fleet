@@ -259,14 +259,18 @@ subscription (same pusher account and OIDC) calls the kill switch's `/alert` pat
 Terraform); anything else is logged and acknowledged. The budget path (`/`) and the alert path never accept each
 other's payloads. Reset is the same as above: fix the cause, then `tf apply`.
 
-UNVERIFIED until the first apply: the Monitoring service agent name
-(`service-<project number>@gcp-sa-monitoring-notification.iam.gserviceaccount.com`, from Google's notification-channel
-docs). If the channel refuses to create, check that page.
+Monitoring publishes as its notification service agent
+(`service-<project number>@gcp-sa-monitoring-notification.iam.gserviceaccount.com`, Google's notification-options
+docs, checked 2026-11-26). Monitoring creates that agent with the project's first Pub/Sub channel, so Terraform
+creates the channel before the topic grant.
 
-**Drill** (cuts public access, like the budget drill; a fake message, not a real incident):
+**Drill** (cuts public access, like the budget drill; a fake message, not a real incident). The message needs a
+current `started_at` (epoch seconds): the switch ignores an incident more than 1 hour old, or one without a date,
+so a redelivered old message can't undo a restore (ADR 0028).
 
 ```powershell
-$msg = '{"version":"1.2","incident":{"state":"open","policy_name":"fleet-broker: 4xx request rate"}}'
+$now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+$msg = '{"version":"1.2","incident":{"state":"open","policy_name":"fleet-broker: 4xx request rate","started_at":' + $now + '}}'
 gcloud pubsub topics publish fleet-flood --message=$msg
 # wait up to a minute: curl.exe -i "$url/nope" answers 403; the logs say "flood alert: public access removed"
 # the same with "state":"closed" or another policy_name: logged and ignored, the broker stays reachable
