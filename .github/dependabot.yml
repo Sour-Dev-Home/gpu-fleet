@@ -5,7 +5,7 @@ updates:
   # Provider versions in each root's .terraform.lock.hcl (ADR 0017). CI runs no plan, and a bump can
   # change defaults: merge by hand only after a local `terraform plan` in each root shows "No changes".
   - package-ecosystem: terraform
-    directories: [/infra/aws/bootstrap, /infra/aws/fleet]
+    directories: [/infra/aws/bootstrap, /infra/aws/fleet, /infra/gcp/fleet]
     schedule: { interval: weekly }
     cooldown: { default-days: 7 }
     groups:

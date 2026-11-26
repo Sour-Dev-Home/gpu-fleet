@@ -26,6 +26,7 @@ updated to point to it.
 | [0018](0018-observability-opentelemetry.md) | Observability with OpenTelemetry: metrics, logs and traces | Accepted (phase 3b) |
 | [0019](0019-public-broker-on-cloud-run.md) | Public broker on Cloud Run: app tokens, keyless AWS access, phase 4 order | Accepted (phase 4) |
 | [0020](0020-postgres-job-store.md) | PostgreSQL job store: pool, SKIP LOCKED claim, advisory-locked migrations, 503 on connection errors | Accepted (phase 4, step 2) |
+| [0021](0021-cloud-run-and-cloud-sql-deployment.md) | Cloud Run and Cloud SQL deployment: sidecar proxy with IAM login, public IP with connectors required, no stored secrets | Accepted (phase 4, step 4) |
 | [0022](0022-container-hardening-and-pinned-ci-tools.md) | Read-only, capability-free Compose containers; SHA-pinned hooks; hash-pinned CI tools; enqueue transport guard | Accepted (maintainer, 2026-11-25, Q67) |
 | [0023](0023-broker-verifies-result-keys.md) | The broker recomputes the result key and answers 422 to a mismatch; worker maps it to ResultRejected | Accepted (maintainer, 2026-11-25, Q66) |
 
