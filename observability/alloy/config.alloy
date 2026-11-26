@@ -43,11 +43,17 @@ otelcol.processor.transform "pc" {
   }
 }
 
+// The token, read from the protected file; is_secret keeps it out of the UI and debug output.
+local.file "grafana_token" {
+  filename  = sys.env("FLEET_GRAFANA_TOKEN_FILE")
+  is_secret = true
+}
+
+// The docs prefer a client_auth block, but in Alloy 1.22 it fails to build ("no credential source
+// provided", measured 2026-11-26 with every field combination), so this uses the top-level form.
 otelcol.auth.basic "grafana" {
-  client_auth {
-    username      = sys.env("FLEET_GRAFANA_INSTANCE_ID")
-    password_file = sys.env("FLEET_GRAFANA_TOKEN_FILE")
-  }
+  username = sys.env("FLEET_GRAFANA_INSTANCE_ID")
+  password = local.file.grafana_token.content
 }
 
 otelcol.exporter.otlphttp "grafana" {
