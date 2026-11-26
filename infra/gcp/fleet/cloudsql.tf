@@ -47,6 +47,31 @@ resource "google_sql_database_instance" "fleet" {
       value = "on"
     }
 
+    # Security logging. Napkin math: a few hundred connections a day (the pool opens at most 4 per instance and
+    # recycles every 30 minutes) at about 200 bytes a line is under 15 MB a month, against 50 GiB free.
+    # UNVERIFIED: PostgreSQL 18 changed log_connections from a bool to a list of options; if apply refuses
+    # "on", the flag needs the value the Cloud SQL docs list for 18 (e.g. "authentication").
+    database_flags {
+      name  = "log_connections"
+      value = "on"
+    }
+    database_flags {
+      name  = "log_disconnections"
+      value = "on"
+    }
+    database_flags {
+      name  = "log_lock_waits"
+      value = "on"
+    }
+    database_flags {
+      name  = "log_checkpoints"
+      value = "on"
+    }
+    database_flags {
+      name  = "log_temp_files"
+      value = "0" # log every temporary file
+    }
+
     ip_configuration {
       ipv4_enabled = true # the public IP; reachable only through the proxy, since no network is authorized
       ssl_mode     = "ENCRYPTED_ONLY"

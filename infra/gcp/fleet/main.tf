@@ -9,6 +9,8 @@ locals {
     "secretmanager.googleapis.com",
     "iam.googleapis.com",
     "iamcredentials.googleapis.com",
+    "cloudresourcemanager.googleapis.com", # project IAM bindings go through this API
+    "monitoring.googleapis.com",           # the 4xx alert (usually on by default; explicit is safer)
   ])
 
   # The IAM database user is the service account's email without ".gserviceaccount.com" (Cloud SQL's rule).
@@ -31,10 +33,16 @@ resource "google_artifact_registry_repository" "fleet" {
   format        = "DOCKER"
   description   = "Fleet container images"
 
-  # The free tier is 0.5 GB and the broker image is about 230 MB: keep two, drop forgotten untagged layers.
-  # A Cloud Run revision pinned to an older digest still runs, but a new instance of it could not pull once
-  # it is cleaned up: deploy the digest you just pushed.
+  # The free tier is 0.5 GB and the broker image is about 230 MB (layers are shared between versions).
+  # Every build gets a unique tag (the short git SHA), never :latest, and tags can't be moved (immutable).
+  # So the untagged-cleanup rule below only ever removes leftovers; tagged versions are never deleted by it,
+  # and the keep rule protects the two newest. Old tagged images pile up: delete them by hand when the
+  # registry nears 0.5 GB (`gcloud artifacts docker images delete`).
   cleanup_policy_dry_run = false
+
+  docker_config {
+    immutable_tags = true
+  }
 
   cleanup_policies {
     id     = "keep-two-most-recent"
@@ -63,24 +71,45 @@ resource "google_service_account" "broker" {
   depends_on = [google_project_service.api]
 }
 
-# Cloud SQL roles are granted on the project: Cloud SQL has no per-instance IAM binding for them. An IAM
-# condition on the instance's resource name might narrow it; not tried, so this is the narrowest known form.
-# The service account's only other permissions are the two secrets below.
+# Cloud SQL roles are granted on the project (Cloud SQL has no per-instance binding), narrowed by an IAM
+# condition to this one instance. UNVERIFIED that the API accepts conditions on both roles: `validate` only
+# checks the schema, so a refusal would show at apply. The service account's only other permissions are the
+# secrets below.
 resource "google_project_iam_member" "sql_client" {
   project = var.project_id
   role    = "roles/cloudsql.client" # connect through the Auth Proxy
   member  = "serviceAccount:${google_service_account.broker.email}"
+
+  condition {
+    title       = "fleet-instance-only"
+    description = "Only the fleet Cloud SQL instance"
+    expression  = "resource.name == \"projects/${var.project_id}/instances/${google_sql_database_instance.fleet.name}\" && resource.type == \"sqladmin.googleapis.com/Instance\""
+  }
+
+  depends_on = [google_project_service.api]
 }
 
 resource "google_project_iam_member" "sql_instance_user" {
   project = var.project_id
   role    = "roles/cloudsql.instanceUser" # log in with IAM database authentication
   member  = "serviceAccount:${google_service_account.broker.email}"
+
+  condition {
+    title       = "fleet-instance-only"
+    description = "Only the fleet Cloud SQL instance"
+    expression  = "resource.name == \"projects/${var.project_id}/instances/${google_sql_database_instance.fleet.name}\" && resource.type == \"sqladmin.googleapis.com/Instance\""
+  }
+
+  depends_on = [google_project_service.api]
 }
 
 # Containers only: the maintainer adds the values with gcloud (Q59), so no secret ever enters Terraform state.
+# The two "-previous" secrets exist only during a token rotation (var.rotation_in_progress; README).
 locals {
-  secret_ids = toset(["fleet-worker-token", "fleet-admin-token"])
+  secret_ids = toset(concat(
+    ["fleet-worker-token", "fleet-admin-token"],
+    var.rotation_in_progress ? ["fleet-worker-token-previous", "fleet-admin-token-previous"] : [],
+  ))
 }
 
 resource "google_secret_manager_secret" "token" {

@@ -1,6 +1,6 @@
 # 0021. Cloud Run and Cloud SQL deployment: sidecar proxy, IAM login, public IP, no stored secrets
 
-**Status:** Accepted (maintainer, 2026-11-25, Q56-Q63)
+**Status:** Accepted (maintainer, 2026-11-25, Q56-Q65)
 **Date:** 2026-11-25
 **Builds on:** [0015](0015-data-class-clearance-capabilities.md), [0017](0017-terraform-aws-layout-and-state.md),
 [0019](0019-public-broker-on-cloud-run.md), [0020](0020-postgres-job-store.md)
@@ -15,8 +15,8 @@ docs/research/phase-4.md.
 - **Sidecar Auth Proxy, IAM login (Q56).** A `cloud-sql-proxy` container (2.28.1, pinned by digest) shares the
   instance's network; the broker connects to `127.0.0.1:5432` with no password. `--auto-iam-authn` logs in as the
   service account `fleet-broker`; the database user is its email without `.gserviceaccount.com`. The account has
-  only `cloudsql.client`, `cloudsql.instanceUser` (project level: the narrowest Cloud SQL offers; conditions
-  untried) and `secretmanager.secretAccessor` on the two secrets only.
+  only `cloudsql.client` and `cloudsql.instanceUser` (project level, narrowed by an IAM condition to this
+  instance; the API accepting conditions on both roles is UNVERIFIED) and `secretmanager.secretAccessor` on the two secrets only.
 - **Public IP, connectors required, TLS only (Q57).** `ipv4_enabled`, no authorized networks,
   `connector_enforcement = REQUIRED`, `ssl_mode = ENCRYPTED_ONLY`. The address is reachable but useless without
   the proxy and IAM. **Rejected for now:** private IP with Direct VPC egress (a /26 subnet, private services
@@ -31,16 +31,29 @@ docs/research/phase-4.md.
   (keep 2 versions, drop untagged after 7 days, inside the 0.5 GB free tier), then `broker_image` set to
   `repo@sha256:...`. The variable refuses a tag. The service is created only when `broker_image` is set, so the
   first apply makes the registry the image goes into. CI deploys wait for the AWS federation work.
-- **Cloud Run numbers (Q61).** Min 0, max 3 instances (the cost and rate-limit ceiling; ADR 0019), 1 CPU and
-  512 MiB for the broker, request-based billing, timeout 30 s, generation 1 (faster cold starts; nothing
+- **Cloud Run numbers (Q61).** Min 0, max 1 instance now and 3 once volunteers join (Q65; the compute and
+  throughput ceiling, ADR 0019), 1 CPU and 512 MiB for the broker plus 0.25 CPU and 256 MiB for the proxy (about
+  54k of the 180k free vCPU-s a month; Cloud Run accepting 1.25 CPU in total with concurrency 40 is UNVERIFIED),
+  request-based billing, timeout 30 s, generation 1 (faster cold starts; nothing
   here needs generation 2). Concurrency 40: Little's law with 3 ms of SQL per request gives 40 x 0.003 = 0.12
   connections busy per instance, so the pool of 4 (ADR 0020) is ample even if every request hits the database;
-  and 3 x 4 = 12 connections stay under the tier's limit (about 25, UNVERIFIED). Startup probes on `/healthz`
+  and at 3 instances 3 x 4 = 12 connections stay under the tier's limit (about 25, UNVERIFIED). Startup probes on `/healthz`
   and on the proxy's `/startup`; the broker starts after the proxy is ready. The cloud broker runs with
   `FLEET_WORKER_CLEARANCE=open` (ADR 0015): cloud workers are volunteers' stand-ins, and footage or derived
   text stay on the maintainer's own backends.
 - **Maintenance (Q62):** Sunday 09:00 UTC (04:00 Eastern), stable track; backups 7 retained, daily 07:00 UTC,
   point-in-time recovery on (UNVERIFIED that `db-f1-micro` allows it; if apply refuses, backups only).
+- **Request log excluded (Q64).** A project log exclusion drops Cloud Run's request log for this service. It
+  records every caller's IP and user agent, and ADR 0018 promised that volunteers' and strangers' IPs are not
+  stored. The broker's own logs stay. Database security logs (connections, disconnections, lock waits,
+  checkpoints, temp files) are on: a few MB a month against 50 GiB free.
+- **Denial of wallet (Q65).** The instance cap bounds compute and throughput, **not per-request fees**: an
+  unauthenticated flood still costs per request. So: max instances 1 now (3 when volunteers join); a Cloud
+  Monitoring alert emails when the 4xx rate stays above 5 requests/s for 5 minutes (the filter syntax is
+  UNVERIFIED until seen in the console); a budget kill switch follows in a separate PR after the first deploy.
+  Considered and deferred to phase 10: a private Cloud Run service with IAM invoker (Kaggle and Colab workers
+  can't easily get Google ID tokens: unsolved), and a Cloudflare edge (airtight only with a load balancer or a
+  private service behind it, since the run.app URL stays reachable otherwise).
 - **Protection and the project ID (Q63).** Deletion protection on the instance (Terraform and API) and the
   service. The project ID is `TF_VAR_project_id` from the vault, never in a file. Provider labels use `gcp-fleet`
   (Google labels cannot contain `/`).

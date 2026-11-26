@@ -74,6 +74,23 @@ resource "google_cloud_run_v2_service" "broker" {
         }
       }
 
+      # Only during a token rotation (README): the broker also accepts the previous tokens.
+      dynamic "env" {
+        for_each = var.rotation_in_progress ? {
+          FLEET_WORKER_TOKEN_PREVIOUS = "fleet-worker-token-previous"
+          FLEET_ADMIN_TOKEN_PREVIOUS  = "fleet-admin-token-previous"
+        } : {}
+        content {
+          name = env.key
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.token[env.value].secret_id
+              version = "latest"
+            }
+          }
+        }
+      }
+
       startup_probe {
         http_get {
           path = "/healthz"
@@ -95,7 +112,9 @@ resource "google_cloud_run_v2_service" "broker" {
         "--auto-iam-authn", # log in with the service account's token: no database password
         "--lazy-refresh",   # refresh certificates on demand: CPU is throttled between requests
         "--health-check",
-        "--http-address=0.0.0.0", # so Cloud Run's probe can reach it
+        "--max-sigterm-delay=10s", # on SIGTERM, wait up to 10 s for open connections to finish
+        "--structured-logs",       # JSON lines Cloud Logging parses
+        "--http-address=0.0.0.0",  # so Cloud Run's probe can reach it
         "--http-port=9090",
         "--port=5432",
         google_sql_database_instance.fleet.connection_name,
@@ -103,7 +122,12 @@ resource "google_cloud_run_v2_service" "broker" {
 
       resources {
         limits = {
-          cpu    = "1" # under 1 CPU Cloud Run forces concurrency 1 (UNVERIFIED for a sidecar): keep it whole
+          # Napkin math: the instance is billed only while a request is handled (about 43k active seconds a
+          # month: 0.43M requests x 0.1 s) at 1.25 vCPU (broker 1 + proxy 0.25) = about 54k vCPU-s of the 180k free.
+          # UNVERIFIED: that Cloud Run accepts a total of 1.25 CPU with concurrency 40 (a service with less than
+          # 1 CPU is limited to concurrency 1, and the rule's reach over sidecars is unclear). If apply refuses,
+          # set this back to "1".
+          cpu    = "0.25"
           memory = "256Mi"
         }
         cpu_idle = true

@@ -1,5 +1,5 @@
 # No terraform.tfvars here: the project ID stays out of git and files. It comes from the environment:
-#   ./scripts/with-secrets.ps1 -Names TF_VAR_project_id,TF_VAR_broker_image -- terraform plan
+#   ./scripts/with-secrets.ps1 -Names TF_VAR_project_id,TF_VAR_alert_email -- terraform plan
 # (TF_VAR_project_id lives in the local vault; see infra/gcp/fleet/README.md).
 
 variable "project_id" {
@@ -47,14 +47,35 @@ variable "maintenance_utc_hour" {
 
 variable "max_instances" {
   description = <<-EOT
-    Cloud Run's cap on instances: it bounds the bill, the fleet-wide rate limit (the token buckets are per
-    instance) and the database connections (instances x pool of 4 must stay under about 25; ADR 0020).
+    Cloud Run's cap on instances: it bounds compute, the fleet-wide rate limit (the token buckets are per
+    instance) and the database connections (instances x pool of 4 must stay under about 25; ADR 0020). It
+    does not bound per-request fees. 1 for now (Q65); it rises to 3 when volunteers join (ADR 0021).
   EOT
   type        = number
-  default     = 3
+  default     = 1
 
   validation {
     condition     = var.max_instances >= 1 && var.max_instances <= 6
     error_message = "max_instances must be 1-6: past 6 the 4-connection pools can exceed the database's limit (ADR 0020)."
   }
+}
+
+variable "alert_email" {
+  description = "Where the 4xx-rate alert goes. Personal: from TF_VAR_alert_email in the vault, never committed, hidden in plan output."
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", var.alert_email))
+    error_message = "alert_email must be an email address."
+  }
+}
+
+variable "rotation_in_progress" {
+  description = <<-EOT
+    True only while rotating the broker's tokens: creates the two "-previous" secrets and passes them to the
+    broker as FLEET_*_TOKEN_PREVIOUS. Add a version to each first (README), or the revision can't start.
+  EOT
+  type        = bool
+  default     = false
 }
