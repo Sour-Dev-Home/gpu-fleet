@@ -1,0 +1,23 @@
+[project]
+name = "fleet-killswitch"
+version = "0.0.1"
+description = "Fleet budget kill switch: removes public access to the broker when spend reaches the budget"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.11"
+dependencies = [
+    "google-cloud-run>=0.10",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"

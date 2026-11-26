@@ -34,6 +34,43 @@ variable "broker_image" {
   }
 }
 
+variable "killswitch_image" {
+  description = <<-EOT
+    The kill switch image, pinned by digest (<registry path>/killswitch@sha256:...). Null until it is pushed: the
+    topic, the budget and the accounts exist without it, and the service and its subscription wait (like broker_image).
+  EOT
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.killswitch_image == null ? true : can(regex("@sha256:[0-9a-f]{64}$", var.killswitch_image))
+    error_message = "killswitch_image must end in @sha256: followed by 64 hex digits (a digest, not a tag)."
+  }
+}
+
+variable "billing_account" {
+  description = "The billing account ID (XXXXXX-XXXXXX-XXXXXX) the budget is created on. From TF_VAR_billing_account in the vault; never committed, hidden in plan output."
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = can(regex("^[0-9A-F]{6}-[0-9A-F]{6}-[0-9A-F]{6}$", var.billing_account))
+    error_message = "billing_account must look like 012345-6789AB-CDEF01."
+  }
+}
+
+variable "budget_usd" {
+  description = "Monthly budget in whole US dollars. At 100% of it the kill switch removes public access to the broker (ADR 0024). Normal running is about $10-11."
+  type        = number
+  default     = 20
+
+  validation {
+    condition     = var.budget_usd >= 1 && floor(var.budget_usd) == var.budget_usd
+    error_message = "budget_usd must be a whole number of dollars, at least 1."
+  }
+}
+
 variable "maintenance_utc_hour" {
   description = "Hour (UTC) of the Sunday Cloud SQL maintenance window. 9 = 04:00 US Eastern in winter, 05:00 in summer."
   type        = number

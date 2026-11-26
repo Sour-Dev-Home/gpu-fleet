@@ -11,6 +11,8 @@ locals {
     "iamcredentials.googleapis.com",
     "cloudresourcemanager.googleapis.com", # project IAM bindings go through this API
     "monitoring.googleapis.com",           # the 4xx alert (usually on by default; explicit is safer)
+    "billingbudgets.googleapis.com",       # the budget (enabling it is harmless if the docs don't require it)
+    "pubsub.googleapis.com",               # the budget's topic and the push subscription
   ])
 
   # The IAM database user is the service account's email without ".gserviceaccount.com" (Cloud SQL's rule).

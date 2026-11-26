@@ -197,3 +197,14 @@ unless opted in, uvicorn's access log off.
 SLO 1.0 over 25 echo jobs; dead-letter alert fired on its first evaluation; queue-stuck went pending at
 600 s and firing 2 minutes later. Cost $0 (all local). Tests: broker 152, worker 107, scripts 32. Checkpoint:
 explained all four, then 2 of 3 on the recap (missed: no data means the broker stopped, not an empty queue).
+
+## Phase 4: milestones so far (the full entry comes at the end of the phase)
+
+- **2026-11-25: broker live on Google Cloud.** Cloud Run (broker + Cloud SQL Auth Proxy sidecar, passwordless IAM
+  database login) on Cloud SQL Postgres 18, all in Terraform with the state in S3; two reviewed applies (26 + 2
+  resources); smoke test 401 without a token, 204 with one, about 0.3 s a lease. ADR 0021.
+- **2026-11-26: budget kill switch built, deployed and drilled.** A $20 gross-spend budget publishes to Pub/Sub,
+  which pushes (OIDC) to a private Cloud Run service that removes public access from the broker through a
+  two-permission custom role bound on that one service; every IAM change it makes emails an audit-log alert. The
+  drill fired it end to end in about 2 minutes (403 at the edge, the alert email) and a reviewed `terraform apply`
+  restored service. 14 resources, about $0 a month. ADR 0024.

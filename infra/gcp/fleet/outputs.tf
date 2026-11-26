@@ -14,6 +14,16 @@ output "registry_path" {
   value       = local.registry
 }
 
+output "killswitch_url" {
+  description = "The private kill switch service URL (null until killswitch_image is set). Needs an invoker token."
+  value       = one(google_cloud_run_v2_service.killswitch[*].uri)
+}
+
+output "budget_topic" {
+  description = "The Pub/Sub topic the budget publishes to (the drill publishes a fake notification here)."
+  value       = google_pubsub_topic.budget.name
+}
+
 output "iam_database_user" {
   description = "The Cloud SQL user the broker logs in as (the GRANT in the README names it)."
   value       = local.db_user

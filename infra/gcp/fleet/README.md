@@ -26,13 +26,14 @@ $env:AWS_PROFILE = "fleet"
 ```powershell
 Set-Secret -Vault fleet -Name TF_VAR_project_id     # prompts; paste the project ID
 Set-Secret -Vault fleet -Name TF_VAR_alert_email    # prompts
+Set-Secret -Vault fleet -Name TF_VAR_billing_account   # prompts; the billing account ID (kill switch)
 cd infra/gcp/fleet
 ../../../scripts/with-secrets.ps1 -Names TF_VAR_project_id -- pwsh -NoProfile -Command 'gcloud auth application-default set-quota-project $env:TF_VAR_project_id'
-../../../scripts/with-secrets.ps1 -Names TF_VAR_project_id,TF_VAR_alert_email -- terraform init
+../../../scripts/with-secrets.ps1 -Names TF_VAR_project_id,TF_VAR_alert_email,TF_VAR_billing_account -- terraform init
 ```
 
 (The quota project makes Application Default Credentials bill API calls to this project, not a Google default.)
-Every Terraform command below runs as `../../../scripts/with-secrets.ps1 -Names TF_VAR_project_id,TF_VAR_alert_email -- terraform ...`,
+Every Terraform command below runs as `../../../scripts/with-secrets.ps1 -Names TF_VAR_project_id,TF_VAR_alert_email,TF_VAR_billing_account -- terraform ...`,
 shortened to `tf`. `gcloud` commands that need the ID run under `with-secrets` too, or use `gcloud config set project` once.
 
 ## 3. First apply (no image)
@@ -185,6 +186,64 @@ come first, then the flag.
 4. Set `rotation_in_progress` back to false and apply (the env refs go). Then disable and destroy superseded versions
    (`gcloud secrets versions disable N --secret=...`, then `gcloud secrets versions destroy N --secret=...`): the free tier is 6 active versions.
 
+## Kill switch (ADR 0024)
+
+At 100% of the $20 monthly budget (`budget_usd`) a private Cloud Run service, pushed by Pub/Sub, removes `allUsers`
+from the broker's invoker role: callers get Google's 403. Budget data lags by hours, so this caps the damage, not
+the first dollar. It needs `TF_VAR_billing_account` (the billing account ID, in the vault: `Set-Secret -Vault fleet
+-Name TF_VAR_billing_account`) alongside the other variables, and the deploying user needs Billing Account
+Administrator (or Costs Manager) on the billing account, plus Pub/Sub Admin. The google provider here sets
+`user_project_override` and `billing_project` so the budget API call is billed to the project.
+
+**Before trusting $20**: open the billing report for this project with credits excluded and confirm normal running
+is about $10-11 gross (the budget counts gross spend, free-tier usage included). `currency_code = "USD"` must
+match the billing account's currency.
+
+**Build, push, apply** (the same as steps 7 and 8, image name `killswitch`, tag = short SHA). The first apply with
+`killswitch_image` null already creates the budget, topic and accounts; the service and subscription come with the image:
+
+```powershell
+$sha  = git rev-parse --short HEAD
+docker build --platform linux/amd64 -t "$repo/killswitch:$sha" killswitch
+docker push "$repo/killswitch:$sha"
+docker buildx imagetools inspect "$repo/killswitch:$sha" | Select-String Digest     # sha256:...
+$env:TF_VAR_killswitch_image = "$repo/killswitch@sha256:<digest>"
+tf plan "-out=tfplan"; tf apply tfplan
+```
+
+(UNVERIFIED until the first apply: whether Cloud Billing's publisher account is
+`billing-budget-alert@system.gserviceaccount.com` and whether the Pub/Sub service agent needs the token-creator
+grant. If the apply refuses a member, check Cloud Billing's budget-notification docs. The first real notification can
+take hours: after the drill, check the killswitch logs again once the budget has sent one.)
+
+**How to tell it fired**
+- `curl.exe -i "$url/lease"` answers `403` with Google's HTML page (not the broker's JSON 401).
+- The killswitch logs (`gcloud run services logs read fleet-killswitch --region us-central1`) show
+  `budget reached: public access removed` with the cost and budget.
+- `tf plan` shows `google_cloud_run_v2_service_iam_member.public` "to add". That is the switch having fired, and
+  the `broker_is_public` check warns too. If you did not intend a reset: stop and investigate first, because any
+  apply (even an unrelated one) restores public access.
+- An email "fleet kill switch changed the broker's IAM policy" arrives for every SetIamPolicy by the switch.
+
+**Reset**: fix the cause (a flood? check the broker's logs and the bill), raise `budget_usd` if the spend was
+legitimate, then `tf apply`: the plan re-adds the `allUsers` binding. If spend is still at the budget, the next
+notification (several a day) trips it again.
+
+**Drill** (do this after the first deploy, and after any change to the switch). It makes the broker UNREACHABLE for
+a minute or so, so do it when nobody depends on it:
+
+```powershell
+gcloud pubsub topics publish fleet-budget --message='{"costAmount": 21, "budgetAmount": 20}'
+# wait up to a minute, then:
+curl.exe -i "$url/nope"        # a GET: expect 403 (Google's page); the killswitch logs say "public access removed"
+                               # (not a bodyless POST: Google answers 411 before any IAM check)
+tf plan                        # expect the public binding "to add"
+tf apply                       # restores it; the broker answers 404 JSON on /nope again
+```
+
+This proves the push, the OIDC token and the IAM edit, not that Cloud Billing can publish to the topic: only a real
+notification does (the budget's topic subscription shows deliveries in the console).
+
 ## 10. Teardown
 
 Deletion protection is on at three levels. Set `deletion_protection = false` on the instance AND
@@ -193,4 +252,5 @@ service; `terraform apply`; then `terraform destroy`. The APIs are left enabled 
 Stopping the instance instead (`gcloud sql instances patch fleet --activation-policy=NEVER`) stops compute charges
 but keeps the disk (about $1.70/month).
 
-The console budget is not in this stack; it is imported later (as with AWS). The budget kill switch is a later PR.
+The existing console budget (if any) is not in this stack; it is imported later (as with AWS). The kill switch's own
+budget is (see "Kill switch").

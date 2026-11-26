@@ -80,3 +80,4 @@ jobs:
         run: |
           docker build -t fleet-worker:ci worker
           docker build -t fleet-broker:ci broker
+          docker build -t fleet-killswitch:ci killswitch
