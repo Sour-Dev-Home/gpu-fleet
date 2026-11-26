@@ -283,6 +283,6 @@ check "broker_is_public" {
       for b in try(jsondecode(data.google_cloud_run_v2_service_iam_policy.broker.policy_data).bindings, []) :
       b.role == "roles/run.invoker" && contains(try(b.members, []), "allUsers")
     ])
-    error_message = "The broker is not public: the budget kill switch has probably fired (ADR 0024). Investigate before applying: apply restores public access."
+    error_message = "The broker is not public: the kill switch (budget or flood alert) has probably fired (ADR 0024, ADR 0028). Investigate before applying: apply restores public access."
   }
 }

@@ -53,7 +53,7 @@ Out of scope everywhere: an attacker on the maintainer's own PC (they would alre
 - [x] Budget kill switch: applied (ADR 0024). At 100% of $20 a private Cloud Run service drops `allUsers` from the
       broker's invoker role; `terraform apply` restores it. Budget data lags by hours, hence the flood alert path:
       an open incident of the 4xx policy, on its own Pub/Sub topic and `/alert` path with a strict parser, does
-      the same (Q93; the Monitoring service agent name is unverified until the first apply).
+      the same (Q93). Applied and drilled 2026-11-26 (ADR 0024, Drills).
 - [x] Token rotation: each role accepts a `*_PREVIOUS` token during a rollover; steps in docs/secrets.md.
 - [x] HTTPS only, through Cloud Run's managed TLS. Plain `http://` is not refused: Cloud Run answers it with a
       302 redirect to `https://`. That is safe because no client sends a token over plain HTTP to a non-loopback
@@ -78,10 +78,11 @@ Out of scope everywhere: an attacker on the maintainer's own PC (they would alre
       over the size cap, or whose SHA-256 differs from what `/upload-url` signed, so a result is recorded
       only if it exists in storage. Applied (S3 mode); S3 enforcement of the signed length, checksum and
       no-overwrite is measured by `scripts/probe-presign.py`.
-- [x] Data-plane lock on the results bucket (Q94): the bucket policy denies `s3:GetObject`, `PutObject` and
-      `DeleteObject` on `inputs/*` and `results/*` to every principal except the broker role and the maintainer's
+- [x] Data-plane lock on the results bucket (Q94): the bucket policy denies `s3:*Object*` (Get, Put, Delete and variants)
+      on `inputs/*` and `results/*` to every principal except the broker role and the maintainer's
       admin principal (`admin_principal_arn`, by `aws:PrincipalArn`), so a leaked or over-broad identity in the account cannot
       reach the data. The TLS-only denies stay. Object actions only, so Terraform cannot lock itself out.
+      Applied and drilled 2026-11-26, written as `s3:*Object*` (also covers the version, ACL and tagging variants).
 - [x] Security review of the deployment (Terraform, IAM, Cloud Run settings), 2026-11-26: Q93-Q95. Re-run on the next
       change to IAM, networking or exposure.
 - [x] `pip-audit` over the three uv lockfiles (broker, worker, kill switch) runs in CI.
