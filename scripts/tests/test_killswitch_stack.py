@@ -129,14 +129,31 @@ def test_the_two_apis_are_enabled():
     assert '"billingbudgets.googleapis.com"' in m and '"pubsub.googleapis.com"' in m
 
 
+def test_killswitch_ingress_is_internal_only_and_its_drill_is_recorded():
+    b = res("google_cloud_run_v2_service", "killswitch")
+    assert re.search(r'(?m)^\s*ingress\s*=\s*"INGRESS_TRAFFIC_INTERNAL_ONLY"', b)
+    raw = (STACK / "killswitch.tf").read_text(encoding="utf-8")
+    head = raw[: raw.index('ingress             = "INGRESS_TRAFFIC_INTERNAL_ONLY"')]
+    assert "confirmed by the re-drill" in head[-600:]
+    readme = (STACK / "README.md").read_text(encoding="utf-8")
+    assert "re-run the drill" in readme.lower() and "internal-only" in readme
+    adr = (ROOT / "docs/adr/0024-budget-kill-switch.md").read_text(encoding="utf-8")
+    assert "INGRESS_TRAFFIC_INTERNAL_ONLY" in adr
+
+
+def test_public_check_parses_the_policy_and_looks_in_the_invoker_binding():
+    b = code("cloudrun.tf")
+    c = b[b.index('check "broker_is_public"') :]
+    assert "jsondecode(data.google_cloud_run_v2_service_iam_policy.broker.policy_data)" in c
+    assert 'b.role == "roles/run.invoker"' in c
+    assert 'contains(try(b.members, []), "allUsers")' in c
+    assert "strcontains" not in c
+
+
 def test_a_check_block_warns_when_the_broker_is_not_public():
     b = code("cloudrun.tf")
     c = b[b.index('check "broker_is_public"') :]
     assert 'data "google_cloud_run_v2_service_iam_policy" "broker"' in c
-    assert re.search(
-        r'strcontains\(data\.google_cloud_run_v2_service_iam_policy\.broker\.policy_data, "allUsers"\)',
-        c,
-    )
 
 
 def test_public_binding_carries_a_warning_comment_and_docs_say_stop_and_investigate():

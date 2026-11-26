@@ -110,12 +110,25 @@ on Google Cloud (ADR 0019/0021) and S3 is on AWS, so it needs AWS credentials wi
   record it and nothing points to it. Quarantine for volunteers (security.md, before phase 10) builds on this.
 - Workers need `FLEET_RESULTS_HOST` set (infra/aws/README.md) before they can use a lease that carries URLs.
 - Cloud Run needs `FLEET_RESULTS_BUCKET`, `FLEET_AWS_ROLE_ARN` (from `terraform output`), `FLEET_AWS_AUDIENCE` and
-  `AWS_REGION`; that wiring is a follow-up PR (`infra/gcp` is not touched here).
+  `AWS_REGION`; that wiring followed in a separate PR (see "As deployed").
 - **Accepted logging gap:** CloudTrail event history keeps `AssumeRoleWithWebIdentity` for 90 days at no cost.
   There are no S3 data events and no alert on assume-role. A management trail to S3 is a later option.
 - URL lifetimes (10 and 5 minutes) stay within botocore's 10-15 minute credential refresh margin, so a URL
   never outlives the credentials that signed it (tested).
 - Cost: S3 requests at this scale are cents (a few thousand a month); STS is free.
+
+## As deployed
+The Cloud Run wiring (`infra/gcp/fleet/cloudrun.tf`) reads the bucket and role ARN from the AWS stack's state
+(`data "terraform_remote_state" "aws"`, same state bucket, key `aws/fleet/terraform.tfstate`), so no new secret or
+variable carries them. The audience is the variable `aws_federation_audience` (a test checks it equals the AWS
+stack's `federation_audience`). `s3_mode` (default true) sets or removes all four settings together: a rollback is
+`-var s3_mode=false`, no code change, and it skips the remote state read.
+
+**First run (2026-11-26).** The broker fetches AWS credentials at startup, so revision 2 becoming Ready was the first
+successful federation (`:sub`, `:aud` and `:oaud` all matched). A cloud smoke test then ran one `open` job end to
+end: enqueue 201; lease 200 with an `input_url` on exactly the bucket's host; presigned GET 200 with a matching
+SHA-256; `/upload-url` 200; PUT 200; a second PUT refused by S3 (412); `/complete` 204 after the broker's HEAD
+check; test objects deleted.
 
 ## Alternatives considered
 - **Workers with AWS keys, or a shared key in the image:** the thing ADR 0002 exists to avoid; revocation means

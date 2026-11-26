@@ -71,9 +71,10 @@ resource "google_cloud_run_v2_service" "killswitch" {
   name     = "fleet-killswitch"
   location = var.region
 
-  # Pub/Sub's push comes from Google's network, so ingress is open; there is NO allUsers binding, so only a
-  # caller with an invoker token (the push subscription's service account) gets in.
-  ingress             = "INGRESS_TRAFFIC_ALL"
+  # Internal only: Google documents Pub/Sub push to an internal-only Cloud Run service in the same project as
+  # allowed; confirmed by the re-drill on 2026-11-26 (ADR 0024). There is also NO allUsers binding,
+  # so only a caller with an invoker token (the push subscription's service account) gets in.
+  ingress             = "INGRESS_TRAFFIC_INTERNAL_ONLY"
   deletion_protection = true
 
   template {

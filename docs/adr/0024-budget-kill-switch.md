@@ -69,6 +69,14 @@ the Pub/Sub token-creator grant, and the log-match filter. Still unproven: that 
 (only a real notification shows it). Lesson: probe with a GET; a bodyless POST gets Google's 411 before any IAM
 check, which hid the 403 at first.
 
+## Change: internal-only ingress (2026-11-26)
+The kill switch service's ingress is now `INGRESS_TRAFFIC_INTERNAL_ONLY` (was `INGRESS_TRAFFIC_ALL`), a review
+follow-up: the service has no business on the public internet. Google documents Pub/Sub push to an internal-only
+Cloud Run service in the same project as allowed. **Confirmed by the re-drill (2026-11-26):** the push arrived
+(HTTP 200), the broker returned Google's 403 after 80 s, and the reset apply restored it. If a future push is
+refused, revert to `INGRESS_TRAFFIC_ALL` (the invoker binding is still the gate). The `broker_is_public`
+check also now parses the policy and requires `allUsers` among the members of the `roles/run.invoker` binding.
+
 ## Consequences
 - **Delay.** Budget data lags by hours, and the first notification can take several. The switch caps damage; it
   does not stop the first dollar. The instance cap and rate limit still bound the burn rate meanwhile.
