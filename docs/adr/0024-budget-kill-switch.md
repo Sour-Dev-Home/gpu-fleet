@@ -77,6 +77,18 @@ Cloud Run service in the same project as allowed. **Confirmed by the re-drill (2
 refused, revert to `INGRESS_TRAFFIC_ALL` (the invoker binding is still the gate). The `broker_is_public`
 check also now parses the policy and requires `allUsers` among the members of the `roles/run.invoker` binding.
 
+## Drills
+- **Re-drill, budget path (2026-11-26).** A real billing notification this time, which settles the point left
+  unproven above: Cloud Billing can publish to the topic. Notification at 19:34:21 UTC, the switch fired at 19:34:54,
+  and the public edge answered 403 at 19:36:39. The Scheduler's telemetry flushes kept returning 204 throughout,
+  because the scheduler account holds its own invoker binding (ADR 0027). A reviewed `terraform apply` (1 added: the
+  `public` binding) restored it, and the edge answered the broker's 404 again at 19:41:21.
+- **Flood path drill (2026-11-26, ADR 0028).** A fake open incident for the flood policy was published at about
+  20:57:00. `/alert` answered 200 and logged "public access removed" at 20:57:02. At 20:58:17 `allUsers` was absent
+  from the policy while the edge still answered 404; at 20:58:31 the edge answered 403. So IAM propagation to the
+  edge took about 90 s after the policy change. A reviewed apply (1 added) restored access.
+- Lesson from both: "removed" in the log and "blocked at the edge" are different moments. Measure the second.
+
 ## Consequences
 - **Delay.** Budget data lags by hours, and the first notification can take several. The switch caps damage; it
   does not stop the first dollar. The instance cap and rate limit still bound the burn rate meanwhile.

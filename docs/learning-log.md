@@ -216,3 +216,47 @@ explained all four, then 2 of 3 on the recap (missed: no data means the broker s
   - Lesson: the first attempt sat silent because the test job named model `qwen3:8b` while the echo runner
     declares `echo`. The broker correctly skipped it (ADR 0015) and nothing made that visible; step 6 adds a
     "queued but unclaimable" signal and a worker startup line stating its declaration.
+
+## Phase 4: the broker on Google Cloud, federated to AWS, watched and hardened (2026-11-26)
+
+Federation was planned for phase 6 and moved into phase 4 (ADR 0025): the broker needed to sign S3 URLs the day it
+went live, and doing it keyless was the whole point.
+
+**Built:** ADRs 0019-0028. The broker on Cloud Run with a Cloud SQL Auth Proxy sidecar and passwordless IAM database
+login (0021). Web identity federation from Google to AWS, presigned S3 URLs for inputs and results, and `/complete`
+HEADing the stored object (0025). The budget kill switch, a private Cloud Run service that removes public access at 100%
+of $20 gross (0024). Telemetry: an unclaimable-jobs gauge, a cancel endpoint, a worker start line and install ID (0026),
+then Grafana Cloud Free over OTLP with one write-only token per source and a Scheduler-driven flush each minute (0027).
+A security review that added a flood alert on the same switch and a data-plane lock on the results bucket (0028).
+
+**Learned:**
+- Federation is a claim check, not a key. AWS trusts Google's signature, and the role pins who (`sub` = the service
+  account's unique ID) and for what (`oaud`). A leaked token is useless after an hour and to anyone else.
+- A kill switch that only reacts to spend is slow: budget data lags by hours, and Cloud Run bills the 4xx a flood sends. A
+  second trigger on the request rate closes that gap; the budget stays as the backstop.
+- "Removed" is not "enforced". The policy change was logged in 2 s and reached the edge about 90 s later. Measure the
+  moment that matters to the attacker, not the one in your log.
+- Request-based billing starves background work. An SDK exporter on a timer has no CPU between requests, so a
+  Scheduler call each minute (43,200 requests a month, inside the 2M free) does the flush instead of paying for
+  always-on CPU.
+- Defence in depth on the bucket: IAM allows say what a role may do; an explicit Deny with `ArnNotLike` says that nobody
+  else may, so a future over-broad identity in the account still cannot read the data.
+
+**Surprises:**
+- The first cross-cloud job sat silent: its model was `qwen3:8b`, the runner declared `echo`, and the broker rightly
+  skipped it. That is why the unclaimable gauge exists.
+- A bodyless POST probe got Google's 411 before any IAM check, which hid the 403 in the first drill. Probe with a GET.
+- Grafana's exporter needs `Authorization=Basic%20<base64>`; a literal space splits the header.
+- A sensitive Terraform variable inside Cloud Run's env makes every env entry unreviewable in plans, so the two
+  identifiers moved into Secret Manager versions.
+
+**Numbers:** a job across both clouds, lease to done, in about 1.4 s with a cold start. Budget drill (real billing
+notification): published 19:34:21 UTC, fired 19:34:54, 403 at the edge 19:36:39, restored by a reviewed apply (1 added),
+404 again at 19:41:21; the Scheduler flushes returned 204 throughout. Flood drill: fake incident about 20:57:00, `/alert`
+200 at 20:57:02, `allUsers` gone from the policy 20:58:17, edge 403 at 20:58:31. Cost about $0 a month beyond Cloud SQL
+(about $9): Secret Manager adds about $0.06 a month for 7 active versions against 6 free.
+
+**Checkpoint (passed 2026-11-26):** four questions: how the OIDC token becomes an identity proof at STS; why the signed
+SHA-256 makes S3 refuse a different file; why the budget path stays next to the flood alert; and request- vs
+instance-based billing at 50 req/s (about 130M requests a month, about $52 in request fees alone). One was re-taught: a
+leaked token making valid 200s is caught by the budget path, not the 4xx alert.

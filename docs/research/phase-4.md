@@ -78,3 +78,82 @@ Read from the Cloud SQL create form (Enterprise, PostgreSQL 18, us-central1, sin
 Decided for step 4 (maintainer, 2026-11-25; goes into step 4's ADR): Q56, Cloud SQL login through the Cloud SQL
 Auth Proxy as a Cloud Run sidecar with `--auto-iam-authn`, no password. Still open: public IP with no authorized
 networks, or private IP.
+
+## Steps 4-7: research notes and decisions (2026-11-25 to 2026-11-26)
+Same rule as above: UNVERIFIED means no fetched official page states it. Decisions are the maintainer's; the ADRs
+hold the reasoning: [0021](../adr/0021-cloud-run-and-cloud-sql-deployment.md),
+[0024](../adr/0024-budget-kill-switch.md), [0025](../adr/0025-presigned-urls-and-aws-federation.md),
+[0026](../adr/0026-telemetry-signals.md), [0027](../adr/0027-telemetry-destination.md),
+[0028](../adr/0028-phase4-security-review.md).
+
+### Cloud SQL login and the proxy (step 4; Q56)
+- Cloud SQL Auth Proxy as a Cloud Run sidecar with `--auto-iam-authn`: IAM database auth, no password. The broker
+  connects to 127.0.0.1:5432 as its service account's IAM user; same `psycopg_pool` code, different
+  `FLEET_DATABASE_URL`. IAM user name = the service account email without `.gserviceaccount.com`, type
+  `CLOUD_IAM_SERVICE_ACCOUNT`; roles `cloudsql.instanceUser` (login) and `cloudsql.client` (connect). A new IAM user
+  "has no privileges": grants are made as `postgres`.
+- Proxy v2 flags: `--auto-iam-authn`, `--lazy-refresh`, `--health-check` (`/startup` returns 200 when ready). The
+  ingress container needs `depends_on` the proxy and the proxy needs a startup probe, or the order is not enforced.
+  Pin the image by digest.
+- `connector_enforcement = REQUIRED` rejects direct connections (the proxy counts as a connector); it also blocks
+  authorized networks and read replicas. `ssl_mode` ENCRYPTED_ONLY fits. Maintenance window hour is UTC.
+- UNVERIFIED: restart on changing the IAM flag, `max_connections` for f1-micro (25 is inferred from 0.6 GB),
+  table rights for an IAM service account on PostgreSQL 15+ (plan: GRANT the role to `postgres`, then
+  `ALTER DATABASE ... OWNER`; fallback `GRANT ALL ON SCHEMA public`), the public IPv4 charge while running.
+- Concurrency default 80 (max 1000); request timeout default 300 s.
+
+### Private Cloud Run, rejected for now (Q65)
+- ID tokens: users get one with `gcloud auth print-identity-token` (Google calls it dev-only); `google-auth`
+  refuses user credentials; Colab is exactly that case; GitHub Actions works through workload identity and a service
+  account; no supported route found for Kaggle. Tokens last 1 hour.
+- Whether IAM-rejected requests are billed: UNVERIFIED (sources disagree). 429 billing: not documented.
+- Cloudflare Workers free plan: 100k requests/day, then Error 1027 (no charges); one rate-limit rule, 10 s window,
+  IP only.
+- Outcome: private Cloud Run deferred to phase 10 (Kaggle unsolved, billing claim unverified); the broker stays
+  public with app tokens, an instance cap, and the kill switch (ADR 0021, 0024).
+
+### Federation and presigned URLs (step 5; Q74-Q80)
+- `accounts.google.com` is built in to AWS: no `aws_iam_openid_connect_provider`; the trust principal is
+  `{"Federated": "accounts.google.com"}`. Condition keys: `:aud` maps to `azp` (else `aud`), `:oaud` to `aud`,
+  `:sub` to `sub`. A Google metadata token has `sub` = `azp` = the service account's numeric unique ID, `aud` = the
+  requested audience, one hour. Pin `:sub` to the unique ID and `:oaud` to our own audience string, checked against a
+  real token's claims.
+- boto3 can do `AssumeRoleWithWebIdentity` from a token file; whether it re-reads the file on refresh is UNVERIFIED,
+  so the broker uses a small refreshable provider that fetches a fresh token. `DurationSeconds` is 900 to the role
+  maximum; a presigned URL dies with its role session even if its own expiry is later.
+- Presigned PUT with a signed `ChecksumSHA256` rejects a mismatched body (BadDigest). Signed length, checksum and
+  `If-None-Match: *` were UNVERIFIED until measured on the real bucket (403 / 400 / 412; `scripts/probe-presign.py`).
+  Without `s3:ListBucket` a missing key answers 403, not 404.
+- Decided (Q74-Q80): one results bucket with `inputs/<sha256>` and `results/<result key>`; the input GET URL rides in
+  `/lease` (10 min), the result PUT URL comes from `POST /upload-url` (5 min, lease token required); the worker
+  declares size and SHA-256, 10 MB cap, broker HEADs before `/complete`; URLs for every data class but only to the
+  lease holder for its own keys; local mode uses a directory store unless `FLEET_RESULTS_BUCKET` is set; a console
+  look-and-cancel walkthrough first.
+
+### Telemetry research (step 6; Q68-Q69, Q84-Q92)
+- Device metrics: `amd-smi` is Linux only (WSL2 experimental) and AMD's device-metrics-exporter has no confirmed
+  Windows build. `windows_exporter` (MIT) has a `gpu` collector, off by default (adapter memory, temperature, power,
+  engine time); sensor support on this GPU generation is UNVERIFIED. Alloy embeds `windows_exporter` 0.31.3. OTel
+  `hw.gpu.*` conventions are Development stability. Ollama has no confirmed `/metrics`; `/api/ps` gives
+  `size_vram` and `/api/generate` gives durations and `eval_count`. NVIDIA notebooks can use `nvidia-ml-py`.
+- Grafana Cloud Free: 10k active series, 50 GB logs and 50 GB traces a month, 14-day retention, 3 users, no card,
+  hard-limited. OTLP gateway with access-policy tokens scoped `metrics:write`, `logs:write`, `traces:write`.
+  Alerting on the Free plan was UNVERIFIED at research time.
+- Cloud Run request-based billing gives CPU only during requests (sidecars too), so background export between requests
+  is throttled; SIGTERM gives about 10 s of CPU for a flush. Hence the Scheduler-driven flush (ADR 0027).
+- Grafana reading Cloud Monitoring needs a service account key file (workload identity only on Grafana Cloud, for the
+  signed-in user, with no alerting), which conflicts with "no stored keys". Platform metrics stay in the Google
+  console (Q90).
+- Decided: Q68 device, platform and per-job metrics; Q69 random install ID, friendly names only in Grafana value
+  mappings, volunteers get per-job numbers only; Q84-Q87 unclaimable-jobs gauge, worker start line, cancel endpoint,
+  install ID (ADR 0026); Q88-Q92 Grafana Cloud Free, a Scheduler flush each minute, platform metrics in the Google
+  console, Alloy on the PC, one 90-day token per source (ADR 0027).
+
+### Security review (step 7; Q93-Q95)
+- Q93: a 4xx-flood alert goes to its own Pub/Sub topic and the kill switch's second, strict parser; drilled with a fake
+  alert (about 90 s IAM propagation to the edge).
+- Q94: the maintainer deactivates then deletes the static admin key; the bucket policy denies object actions on
+  `inputs/*` and `results/*` to everyone but the broker role and the admin principal.
+- Q95: the small-fixes list (security notes refresh, delete the unused sample service account, pin the service-level
+  instance cap, `pip-audit` in CI, document dropped request logs and key-name exposure, lock Alloy's data directory,
+  check a local database listening on all interfaces, `fleet-enqueue --data-class` required). See ADR 0028.
