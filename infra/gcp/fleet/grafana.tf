@@ -27,19 +27,90 @@ locals {
 
   # Names are listed apart from the values: the values can be sensitive, and for_each can't iterate a
   # sensitive collection. Empty when the export is off, so the broker's env is exactly as before.
+  # Only NON-sensitive values live here. One sensitive value inside the service's env set would make every env
+  # entry "(sensitive value)" in plans and the broker's env could not be reviewed; the endpoint and the instance
+  # ID therefore reach the broker as secret references (below), a test pins that no env value uses a sensitive
+  # variable.
   grafana_env_names = var.grafana_export ? toset([
-    "OTEL_EXPORTER_OTLP_ENDPOINT",
-    "FLEET_GRAFANA_INSTANCE_ID",
     "FLEET_FLUSH_OIDC_AUDIENCE",
     "FLEET_FLUSH_OIDC_EMAIL",
   ]) : toset([])
 
   grafana_env = {
-    OTEL_EXPORTER_OTLP_ENDPOINT = var.grafana_otlp_endpoint
-    FLEET_GRAFANA_INSTANCE_ID   = var.grafana_instance_id
-    FLEET_FLUSH_OIDC_AUDIENCE   = local.flush_audience
-    FLEET_FLUSH_OIDC_EMAIL      = google_service_account.scheduler.email
+    FLEET_FLUSH_OIDC_AUDIENCE = local.flush_audience
+    FLEET_FLUSH_OIDC_EMAIL    = google_service_account.scheduler.email
   }
+}
+
+# --- the stack's account identifiers, as secret versions ---------------------------------------------------------
+
+# The OTLP endpoint and the instance ID are identifiers, not secrets (the token is the secret). They are stored
+# here WITH their versions, so the values sit in Terraform state: fine, the state is private (ADR 0027). Going
+# through Secret Manager keeps them out of plan text (sensitive variables) without making the broker's whole env
+# sensitive. The broker reads them pinned to these versions: the ordering is guaranteed and a change rolls a
+# new revision.
+resource "google_secret_manager_secret" "grafana_otlp_endpoint" {
+  count = var.grafana_export ? 1 : 0
+
+  secret_id = "fleet-grafana-otlp-endpoint"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [google_project_service.api]
+}
+
+resource "google_secret_manager_secret_version" "grafana_otlp_endpoint" {
+  count = var.grafana_export ? 1 : 0
+
+  secret      = google_secret_manager_secret.grafana_otlp_endpoint[0].id
+  secret_data = var.grafana_otlp_endpoint
+
+  # A changed value makes a new version: create it before destroying the old one, which the running revision
+  # still pins (min instances 0, so a cold start in between would fail).
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "google_secret_manager_secret_iam_member" "broker_reads_grafana_otlp_endpoint" {
+  count = var.grafana_export ? 1 : 0
+
+  secret_id = google_secret_manager_secret.grafana_otlp_endpoint[0].secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.broker.email}"
+}
+
+resource "google_secret_manager_secret" "grafana_instance_id" {
+  count = var.grafana_export ? 1 : 0
+
+  secret_id = "fleet-grafana-instance-id"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [google_project_service.api]
+}
+
+resource "google_secret_manager_secret_version" "grafana_instance_id" {
+  count = var.grafana_export ? 1 : 0
+
+  secret      = google_secret_manager_secret.grafana_instance_id[0].id
+  secret_data = var.grafana_instance_id
+
+  lifecycle {
+    create_before_destroy = true # see grafana_otlp_endpoint
+  }
+}
+
+resource "google_secret_manager_secret_iam_member" "broker_reads_grafana_instance_id" {
+  count = var.grafana_export ? 1 : 0
+
+  secret_id = google_secret_manager_secret.grafana_instance_id[0].secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.broker.email}"
 }
 
 # --- the broker's Grafana token ------------------------------------------------------------------------------
