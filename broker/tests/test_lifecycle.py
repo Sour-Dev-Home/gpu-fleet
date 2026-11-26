@@ -1,4 +1,6 @@
-from fleet_broker.store import JobStore
+import pytest
+from fleet_broker.addressing import result_key
+from fleet_broker.store import JobStore, ResultKeyMismatch
 
 NOW = 1_800_000_000.0
 # Clears everything: these tests are about leases, not about who may take which job (test_clearance.py).
@@ -8,7 +10,7 @@ ANY = {
     "models": {"qwen3-vl:8b", "m"},
 }
 TTL = 60.0
-KEY = "f" * 64  # a result key
+KEY = result_key("a" * 64, "qwen3-vl:8b", "describe-v1")  # what store_with's jobs hash to
 
 
 def store_with(open_store, n: int = 1, max_attempts: int = 3) -> JobStore:
@@ -69,7 +71,22 @@ def test_complete_retry_is_accepted_but_a_different_result_is_not(open_store):
     c = store.claim(NOW, TTL, **ANY)
     assert store.complete("j0", c.lease_token, KEY)
     assert store.complete("j0", c.lease_token, KEY)  # response was lost; worker retries
-    assert not store.complete("j0", c.lease_token, "0" * 64)
+    with pytest.raises(ResultKeyMismatch):  # even once done: the key is the job's, not the client's
+        store.complete("j0", c.lease_token, "0" * 64)
+    assert store.get("j0")["result_key"] == KEY
+
+
+def test_a_key_that_is_not_the_jobs_is_refused_and_leaves_the_lease(open_store):
+    store = store_with(open_store, 2)
+    c = store.claim(NOW, TTL, **ANY)
+    other = result_key("a" * 64, "qwen3-vl:8b", "describe-v2")  # a real key, but for another job
+    with pytest.raises(ResultKeyMismatch):
+        store.complete("j0", c.lease_token, other)
+    row = store.get("j0")
+    assert (row["state"], row["result_key"]) == ("leased", None)
+    assert store.complete("j0", c.lease_token, KEY)  # the holder can still finish properly
+    # A stale token learns nothing about the key: plain refusal, not a mismatch.
+    assert store.complete("j1", "not-the-token", other) is None
 
 
 # --- expiry and dead letters (your claim() changes) ---

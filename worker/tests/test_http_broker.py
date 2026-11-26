@@ -75,6 +75,23 @@ def test_rate_limited_or_busy_is_retried_later(status):
         b.heartbeat(a_lease(received_at=1000.0))
 
 
+def test_a_refused_result_key_is_neither_lease_lost_nor_transient():
+    # 422 from /complete: the broker recomputed the content address and it differs (ADR 0023).
+    from fleet_worker.loop import ResultRejected, TransientError
+
+    clock = FakeClock()
+    b = broker({"/complete": httpx.Response(422, json={"detail": "x"})}, clock)
+    with pytest.raises(ResultRejected) as e:
+        b.complete(a_lease(received_at=1000.0), "f" * 64)
+    assert not isinstance(e.value, (LeaseLost, TransientError))
+
+
+def test_complete_409_is_still_lease_lost():
+    b = broker({"/complete": httpx.Response(409)}, FakeClock())
+    with pytest.raises(LeaseLost):
+        b.complete(a_lease(received_at=1000.0), "f" * 64)
+
+
 def test_other_errors_are_not_mistaken_for_lease_lost():
     clock = FakeClock()
     b = broker({"/heartbeat": httpx.Response(401)}, clock)

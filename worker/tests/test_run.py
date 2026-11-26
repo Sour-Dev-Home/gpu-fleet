@@ -98,6 +98,36 @@ def test_custom_validator_is_used():
     assert broker.completed == []
 
 
+def test_a_refused_result_key_backs_off_and_the_worker_goes_on(caplog):
+    from fleet_worker.loop import ResultRejected
+
+    worker, broker, _ = make([])
+    queue = [lease_for(), lease_for(Job("j2", "b" * 64, "m", "v1"))]
+    sleeps: list[float] = []
+    calls = []
+
+    def next_lease():
+        # Asking again before any sleep would be a spin; after the rejection it must wait first.
+        if calls:
+            assert sleeps == [1], "no backoff after a refused key"
+        return queue.pop(0) if queue else None
+
+    def refusing_complete(lease, key):
+        calls.append(lease.job.job_id)
+        if len(calls) == 1:
+            raise ResultRejected(lease.job.job_id)
+        broker.completed.append((lease, key))
+
+    broker.lease, broker.complete = next_lease, refusing_complete
+    worker.run(
+        should_stop=lambda: len(calls) >= 2,
+        sleep=sleeps.append,
+        backoff=Backoff(base=1, cap=60, rng=lambda: 1.0),
+    )
+    assert calls == ["j1", "j2"]  # went on to the next job: not fatal, not "lease lost"
+    assert "j1" in caplog.text
+
+
 def test_lease_lost_does_not_stop_the_worker():
     worker, broker, _ = make([lease_for(), lease_for(Job("j2", "b" * 64, "m", "v1"))])
     calls = []

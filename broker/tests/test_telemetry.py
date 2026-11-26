@@ -5,6 +5,7 @@ from contextlib import ExitStack
 from conftest import make_store
 from fastapi.testclient import TestClient
 from fleet_broker import telemetry
+from fleet_broker.addressing import result_key
 from fleet_broker.app import create_app
 from fleet_broker.store import JobStore
 from opentelemetry.sdk.metrics import MeterProvider
@@ -75,7 +76,12 @@ def complete(client, leased):
     body = {
         "job_id": leased["job_id"],
         "lease_token": leased["lease_token"],
-        "result_key": "f" * 64,
+        "result_key": result_key(
+            leased["input_sha256"],
+            leased["model"],
+            leased["prompt_version"],
+            leased.get("context_sha256"),
+        ),
     }
     r = client.post("/complete", json=body, headers={"Authorization": f"Bearer {WORKER}"})
     assert r.status_code == 204
@@ -111,6 +117,19 @@ def test_completion_counts_once_and_records_turnaround(db_url):
     assert dict(done.attributes) == {"model": "m", "prompt_version": "v1", "data_class": "open"}
     (turnaround,) = p["fleet.job.turnaround"]
     assert turnaround.count == 1 and turnaround.sum == 42
+
+
+def test_a_refused_result_key_is_counted_and_is_not_a_completion(db_url):
+    client, _clock, reader = rig(db_url)
+    add(client, "a")
+    leased = lease(client)
+    body = {"job_id": "a", "lease_token": leased["lease_token"], "result_key": "f" * 64}
+    r = client.post("/complete", json=body, headers={"Authorization": f"Bearer {WORKER}"})
+    assert r.status_code == 422
+    p = points(reader)
+    (rejected,) = p["fleet.results.rejected"]
+    assert rejected.value == 1
+    assert "fleet.jobs.completed" not in p
 
 
 def test_gauge_labels_cover_every_state_and_data_class():

@@ -23,6 +23,8 @@ from psycopg.conninfo import conninfo_to_dict
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool, PoolClosed, PoolTimeout
 
+from . import addressing
+
 # The pool's numbers (ADR 0020). 20 requests/s x 3 ms of SQL each is ~0.06 connections busy
 # (Little's law), so 4 is generous. max_instances(3) x 4 = 12 stays under Cloud SQL's
 # smallest-tier connection limit.
@@ -207,6 +209,16 @@ class QueueStats:
     oldest_available_enqueued_at: float | None  # None: nothing available, or only pre-ADR-0018 rows
 
 
+def result_key_for(job: dict[str, Any]) -> str:
+    return addressing.result_key(
+        job["input_sha256"], job["model"], job["prompt_version"], job["context_sha256"]
+    )
+
+
+class ResultKeyMismatch(Exception):
+    """The lease holder named a result key that is not the job's content address (ADR 0023)."""
+
+
 class JobStore:
     """Stateless apart from the pool it was given: one instance serves every request."""
 
@@ -329,14 +341,25 @@ class JobStore:
         """Mark the job done with its result key. A Completion if accepted, else None.
 
         Idempotent: repeating the same completion (a retry after a lost response) is
-        accepted again, with first=False. A stale token, or a different result key for a
-        done job, is not.
+        accepted again, with first=False. A stale token is refused (None).
+
+        The key is recomputed from the job's own stored fields; a different one raises
+        ResultKeyMismatch, whether the job is leased or already done, and changes nothing.
+        Only the holder of the job's current token is told (a stale token gets None, so
+        nobody learns anything about a job they do not hold).
         """
         facts = (
             "model, prompt_version, COALESCE(data_class, 'footage') AS data_class,"
             " enqueued_at, done_at"
         )
         with self.pool.connection() as conn:
+            job = conn.execute(
+                "SELECT input_sha256, model, prompt_version, context_sha256 FROM jobs"
+                " WHERE job_id = %s AND lease_token = %s AND state IN ('leased', 'done')",
+                (job_id, _digest(lease_token)),
+            ).fetchone()
+            if job is not None and result_key_for(job) != result_key:
+                raise ResultKeyMismatch(job_id)
             # The first completion moves leased -> done, atomically: only one caller can win it.
             # (Telling "first" apart by time would miscount a retry within the same clock tick.)
             row = conn.execute(

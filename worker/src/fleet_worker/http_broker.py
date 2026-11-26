@@ -8,7 +8,7 @@ from dataclasses import replace
 import httpx
 
 from . import telemetry
-from .loop import LeaseLost, TransientError
+from .loop import LeaseLost, ResultRejected, TransientError
 from .protocol import Job, Lease
 
 
@@ -108,4 +108,8 @@ class HttpBroker:
             # The result is already stored under its content key, so nothing is lost:
             # whoever holds the job now will find it and complete cheaply.
             raise LeaseLost(lease.job.job_id)
+        if r.status_code == 422:
+            # The broker recomputed the content address and it differs (ADR 0023). Retrying
+            # sends the same key, and the lease is not lost: its own outcome.
+            raise ResultRejected(lease.job.job_id)
         r.raise_for_status()

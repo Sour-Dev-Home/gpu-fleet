@@ -25,6 +25,13 @@ class TransientError(Exception):
     """The broker is unreachable or failing (network error, 5xx). Wait and try again."""
 
 
+class ResultRejected(Exception):
+    """The broker refused the result key (422, ADR 0023): it is not the job's content address.
+    Not LeaseLost (the lease is fine) and not transient (a retry sends the same key). The lease
+    is left to expire, like an invalid result, so the job is retried and counts toward the
+    dead-letter limit. It means this worker's key formula differs from the broker's."""
+
+
 class InvalidResult(Exception):
     """The runner's output failed validation. It is never stored, so it never gets a content
     address and can never be served from the cache. The lease is left to expire: the job is
@@ -235,6 +242,10 @@ class Worker:
             except LeaseLost as e:
                 log.warning("lease lost on %s; moving on", e)
                 backoff.reset()
+                continue
+            except ResultRejected as e:
+                log.error("broker refused the result key for %s; leaving the lease to expire", e)
+                sleep(backoff.next_delay())  # a systematic mismatch must not spin
                 continue
             except InvalidResult as e:
                 log.warning("invalid result, not stored: %s", e)

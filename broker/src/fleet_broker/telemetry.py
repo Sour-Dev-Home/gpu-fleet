@@ -41,6 +41,9 @@ class Metrics:
     def completed(self, done: Completion) -> None:
         pass
 
+    def result_rejected(self) -> None:
+        pass
+
     def busy(self) -> None:
         pass
 
@@ -89,6 +92,11 @@ class OtelMetrics(Metrics):
         self._completed = meter.create_counter(
             "fleet.jobs.completed", unit="{job}", description="Jobs completed (each once)"
         )
+        self._rejected = meter.create_counter(
+            "fleet.results.rejected",
+            unit="{result}",
+            description="Completions refused: result_key was not the job's content address",
+        )
         self._turnaround = meter.create_histogram(
             "fleet.job.turnaround",
             unit="s",
@@ -117,6 +125,9 @@ class OtelMetrics(Metrics):
         self._completed.add(1, labels)
         if done.enqueued_at is not None and done.done_at is not None:
             self._turnaround.record(max(0.0, done.done_at - done.enqueued_at), labels)
+
+    def result_rejected(self) -> None:
+        self._rejected.add(1)
 
     def busy(self) -> None:
         self._busy.add(1)

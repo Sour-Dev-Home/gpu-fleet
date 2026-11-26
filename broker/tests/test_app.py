@@ -252,9 +252,58 @@ def test_heartbeat_and_complete_with_a_stale_token_are_409(worker):
 
 def test_complete_is_idempotent_over_http(worker):
     lease = worker.post("/lease", json=CAPS).json()
-    done = {"job_id": "j0", "lease_token": lease["lease_token"], "result_key": "f" * 64}
+    done = {"job_id": "j0", "lease_token": lease["lease_token"], "result_key": key_for(JOB)}
     assert worker.post("/complete", json=done).status_code == 204
     assert worker.post("/complete", json=done).status_code == 204  # retry after a lost response
+
+
+# --- the broker checks the result key itself (ADR 0023) ---
+
+
+def key_for(job: dict, context: str | None = None) -> str:
+    import hashlib
+    import json
+
+    parts = [job["input_sha256"], job["model"], job["prompt_version"]]
+    if context is not None:
+        parts.append(context)
+    return hashlib.sha256(json.dumps(parts).encode("utf-8")).hexdigest()
+
+
+def test_a_result_key_that_is_not_the_jobs_is_422_and_changes_nothing(worker, open_store, caplog):
+    lease = worker.post("/lease", json=CAPS).json()
+    done = {"job_id": "j0", "lease_token": lease["lease_token"], "result_key": "f" * 64}
+    with caplog.at_level(logging.WARNING, logger="fleet_broker"):
+        assert worker.post("/complete", json=done).status_code == 422
+    row = open_store().get("j0")
+    assert (row["state"], row["result_key"]) == ("leased", None)  # still the worker's
+    assert "j0" in caplog.text
+    assert "f" * 64 not in caplog.text  # the job id only
+    # the right key works and is idempotent; a wrong one is refused even once the job is done
+    right = done | {"result_key": key_for(JOB)}
+    assert worker.post("/complete", json=right).status_code == 204
+    assert worker.post("/complete", json=right).status_code == 204
+    assert worker.post("/complete", json=done).status_code == 422
+    row = open_store().get("j0")
+    assert (row["state"], row["result_key"]) == ("done", key_for(JOB))
+
+
+def test_the_key_includes_the_context_when_the_job_has_one(db_url):
+    ctx = "c" * 64
+    as_(ADMIN, db_url).post("/jobs", json=JOB | {"context_sha256": ctx})
+    c = as_(WORKER, db_url)
+    lease = c.post("/lease", json=CAPS).json()
+    done = {"job_id": "j0", "lease_token": lease["lease_token"]}
+    assert c.post("/complete", json=done | {"result_key": key_for(JOB)}).status_code == 422
+    assert c.post("/complete", json=done | {"result_key": key_for(JOB, ctx)}).status_code == 204
+
+
+def test_a_stale_token_with_a_wrong_key_is_409_not_422(worker):
+    worker.post(
+        "/lease", json=CAPS
+    )  # a 422 would tell a non-holder nothing, but 409 is the contract
+    stale = {"job_id": "j0", "lease_token": "nope", "result_key": "f" * 64}
+    assert worker.post("/complete", json=stale).status_code == 409
 
 
 def test_context_must_be_a_sha256_when_given(db_url):

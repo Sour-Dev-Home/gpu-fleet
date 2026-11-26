@@ -4,6 +4,7 @@ import time
 
 import psycopg
 import pytest
+from fleet_broker.addressing import result_key
 from fleet_broker.store import (
     CLAIM_SQL,
     MIGRATION_LOCK_KEY,
@@ -63,9 +64,10 @@ def test_a_copy_of_the_database_cannot_take_over_a_lease(open_store):
     stolen = store.get("j0")["lease_token"]
     assert claim.lease_token not in {stolen, None}
     assert store.heartbeat("j0", stolen, NOW, 60) is None
-    assert store.complete("j0", stolen, "f" * 64, now=NOW) is None
+    key = result_key("a" * 64, "qwen3-vl:8b", "describe-v1")
+    assert store.complete("j0", stolen, key, now=NOW) is None
     assert store.heartbeat("j0", claim.lease_token, NOW, 60) == NOW + 60
-    assert store.complete("j0", claim.lease_token, "f" * 64, now=NOW).first
+    assert store.complete("j0", claim.lease_token, key, now=NOW).first
 
 
 def test_claimed_job_is_not_claimed_again(open_store):
