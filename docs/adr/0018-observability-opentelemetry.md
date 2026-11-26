@@ -43,8 +43,21 @@ The broker becomes public in phase 4, so whatever exposes telemetry must not exp
   private network (the Compose collector) that allows any host, so never set it in the cloud.
   uvicorn's access log is off: one line per request with the caller's IP, which spans and metrics
   already cover without it.
-- The local stack binds every port to 127.0.0.1 (Grafana's default login is `admin`/`admin`) and keeps
-  `/data` on a named volume. The image is pinned by digest.
+- The local stack publishes only Grafana, on 127.0.0.1, with the image's anonymous Admin access turned
+  off (login `admin`/`admin`; a web page in the browser can reach loopback too). `/data` is a named
+  volume; the image is pinned by digest and bumped by Dependabot's docker-compose entry.
+- **Dashboard, alerts and SLO (step 5)** live in `observability/grafana`, mounted read-only, so the repo is
+  the only source (UI edits aren't saved). `scripts/tests/test_grafana.py` keeps every query on a real
+  broker metric and every gauge under `max`.
+  - *Dead letters:* fires while any job is `dead`, and keeps firing until a person deals with it (the
+    SQS dead-letter-queue alarm pattern).
+  - *Queue stuck:* the oldest queued job over 600 s for 2 minutes. The gauge reports 0 for an empty
+    queue, so no data means the broker stopped reporting, and that fires too.
+  - *SLO:* the share of jobs finished in the dashboard's time range with turnaround at most 900 s
+    (a histogram bucket edge, so exact), objective 95%; error budget left = 1 - (1 - SLI) / 0.05. It
+    counts finished jobs only; the queue-stuck alert covers the ones that never finish.
+  - No contact point yet: alerts show in Grafana. Notifications (and burn-rate alerts on the budget)
+    come with phase 4's hosted monitoring.
 
 ## Consequences
 - A slow job is traceable from its log line to the span that took the time.
