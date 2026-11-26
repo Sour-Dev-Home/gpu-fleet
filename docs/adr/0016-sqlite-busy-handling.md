@@ -1,6 +1,8 @@
 # 0016: SQLite busy handling (WAL, 503 with Retry-After, client retries)
 
-Status: Accepted (maintainer, 2026-11-25, Q18)
+Status: Accepted (maintainer, 2026-11-25, Q18). Partly superseded by [0020](0020-postgres-job-store.md): items 1
+(WAL) and the SQLite lock detection in 2 are gone with SQLite; the 503 + `Retry-After: 1` contract and item 3
+(client retries) stay, now for Postgres connection, pool, statement and lock timeouts.
 Date: 2026-11-25
 
 ## Context

@@ -40,6 +40,15 @@ Syncthing-backed folder plus a USB copy (you own the backups).
   ./scripts/with-secrets.ps1 -Names FLEET_WORKER_TOKEN,FLEET_ADMIN_TOKEN -- uv run --directory broker --with uvicorn uvicorn fleet_broker.app:app
   ```
   Workers get only the worker token.
+- Database password (ADR 0020): `FLEET_DB_PASSWORD`, for the Compose `postgres` service and the broker's
+  `FLEET_DATABASE_URL`. Generate it into the vault as hex, not base64: it goes into a URL, where `+`, `/` and `=` break:
+  ```powershell
+  Set-Secret -Vault fleet -Name FLEET_DB_PASSWORD -Secret ([Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)))
+  ./scripts/with-secrets.ps1 -Names FLEET_WORKER_TOKEN,FLEET_ADMIN_TOKEN,FLEET_DB_PASSWORD -- docker compose up --build
+  ```
+  Changing it later does not change a database that already exists: the password is set when the `postgres-data`
+  volume is first initialised. Rotate with `ALTER ROLE fleet PASSWORD '...'` and then the vault, or `down -v` to start
+  empty. Run the broker outside Compose with `FLEET_DATABASE_URL` in the vault (a `postgresql://` URL with the password).
 
 ### Rotating broker tokens (no downtime)
 The broker accepts a second, previous token per role while a rotation is under way, so workers switch one at a

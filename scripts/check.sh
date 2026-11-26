@@ -6,6 +6,8 @@
 #
 # Tests run in every package with a pyproject.toml, on the oldest supported Python (3.11),
 # from the lockfile. Prints one summary line per stage; exits non-zero if anything failed.
+# The broker's tests need PostgreSQL: set FLEET_TEST_DATABASE_URL (an admin URL), or this script
+# starts a throwaway postgres:18 container and removes it afterwards (needs docker).
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
@@ -44,6 +46,54 @@ fi
 
 pkgs=$(git ls-files '*pyproject.toml')
 [ -n "$pkgs" ] || { echo "no pyproject.toml found: nothing tested" >&2; exit 1; }
+
+# The broker's tests run against a real PostgreSQL (ADR 0020), each test in its own database, made
+# through FLEET_TEST_DATABASE_URL (an admin URL). CI provides one as a service container. Without it,
+# start a throwaway postgres:18 on a random loopback port and remove it afterwards, whatever happens.
+# The image digest is the same as compose.yaml's (scripts/tests/test_postgres_pin.py checks).
+PG_IMAGE=postgres:18@sha256:c699303802144847d238196173655dbbecf7a96aeca1565f2b02eb671a1f0b6b
+pg_container=""
+stop_pg() {
+  if [ -n "$pg_container" ]; then
+    docker rm -f -v "$pg_container" >/dev/null 2>&1
+    pg_container=""
+  fi
+}
+if [ -z "${FLEET_TEST_DATABASE_URL:-}" ]; then
+  command -v docker >/dev/null 2>&1 || {
+    echo "docker is needed for the broker tests (a throwaway postgres), or set FLEET_TEST_DATABASE_URL" >&2
+    exit 1
+  }
+  # EXIT covers normal ends and failures; INT/TERM turn a Ctrl-C into an exit, so EXIT runs too.
+  trap stop_pg EXIT
+  trap 'exit 130' INT TERM
+  # A random password, in this process's environment only (docker reads POSTGRES_PASSWORD by name,
+  # so it never appears in a command line); the container is reachable on loopback only, and lives
+  # minutes.
+  PGPW=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+  pg_container="fleet-check-pg-$$-$RANDOM"
+  # fsync=off: a database that is thrown away needs no durability, and it makes the tests faster.
+  if ! POSTGRES_PASSWORD="$PGPW" docker run -d --name "$pg_container" -e POSTGRES_PASSWORD \
+      -p 127.0.0.1::5432 "$PG_IMAGE" -c fsync=off -c synchronous_commit=off -c full_page_writes=off \
+      >/dev/null; then
+    echo "could not start the throwaway postgres" >&2
+    exit 1
+  fi
+  hostport=""
+  for _ in $(seq 1 60); do
+    # -h 127.0.0.1: the image's init phase runs a temporary server on the socket only, so the
+    # TCP check passes only once the real server is up.
+    if docker exec "$pg_container" pg_isready -q -h 127.0.0.1 -U postgres >/dev/null 2>&1; then
+      hostport=$(docker port "$pg_container" 5432/tcp | head -n 1)
+      break
+    fi
+    sleep 1
+  done
+  [ -n "$hostport" ] || { echo "the throwaway postgres did not become ready" >&2; exit 1; }
+  FLEET_TEST_DATABASE_URL="postgresql://postgres:${PGPW}@127.0.0.1:${hostport##*:}/postgres"
+fi
+export FLEET_TEST_DATABASE_URL
+
 for p in $pkgs; do
   d=$(dirname "$p")
   out=$(cd "$d" && uv sync -q --locked --python "$PY" && uv run -q --locked --python "$PY" pytest -q -p no:cacheprovider 2>&1)
@@ -66,4 +116,5 @@ if [ -d scripts/tests ]; then
     printf '%s\n' "$out" | tail -n 20; echo "scripts: FAILED"; failed=1; fi
 fi
 
+stop_pg
 exit $failed

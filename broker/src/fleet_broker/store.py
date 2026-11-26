@@ -1,21 +1,48 @@
-"""The broker's job table, in SQLite.
+"""The broker's job table, in PostgreSQL (ADR 0020).
 
-Every state change is a single SQL statement, and SQLite runs each write under a
-database-wide lock, so a statement is atomic: two workers can never claim the same job.
+Every state change is a single SQL statement (autocommit), and a claim locks the row it picks
+with FOR UPDATE SKIP LOCKED, so two workers can never claim the same job and never wait for
+each other either.
 
 Times are the broker's wall clock (time.time()), passed in as `now` so tests use plain
 numbers. Only the broker compares them; workers only ever see durations (ttl_seconds).
+
+A connection is held only while SQL runs: every method checks one out of the pool, runs its
+statements and gives it back.
 """
 
 import hashlib
 import secrets
-import sqlite3
 from collections.abc import Collection
 from dataclasses import dataclass
-from pathlib import Path
+from typing import Any
+
+import psycopg
+from psycopg import Connection
+from psycopg.conninfo import conninfo_to_dict
+from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool, PoolClosed, PoolTimeout
+
+# The pool's numbers (ADR 0020). 20 requests/s x 3 ms of SQL each is ~0.06 connections busy
+# (Little's law), so 4 is generous. max_instances(3) x 4 = 12 stays under Cloud SQL's
+# smallest-tier connection limit.
+POOL_MAX_SIZE = 4
+POOL_TIMEOUT = 2.0  # seconds to wait for a free connection before answering 503
+POOL_MAX_LIFETIME = 1800.0  # recycle connections: survives failovers and maintenance restarts
+# Session limits, set on every pooled connection (a stuck query or transaction must not hold
+# one of four connections for long).
+SESSION_SETTINGS = {
+    "statement_timeout": "5s",
+    "idle_in_transaction_session_timeout": "10s",
+    "lock_timeout": "3s",
+}
+# Arbitrary, fixed: the advisory lock concurrent instances take while migrating.
+MIGRATION_LOCK_KEY = 0x666C656574  # "fleet"
+MIGRATE_CONNECT_TIMEOUT = 10.0  # at startup the database may still be coming up
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
+    seq              BIGINT GENERATED ALWAYS AS IDENTITY,  -- FIFO order (Postgres has no rowid)
     job_id           TEXT PRIMARY KEY,
     input_sha256     TEXT NOT NULL,
     model            TEXT NOT NULL,
@@ -24,39 +51,121 @@ CREATE TABLE IF NOT EXISTS jobs (
                      CHECK (state IN ('queued', 'leased', 'done', 'dead')),
     attempts         INTEGER NOT NULL DEFAULT 0,  -- how many times the job was leased
     lease_token      TEXT,                        -- sha256 of the lease token, set while leased
-    lease_expires_at REAL,                        -- broker wall clock, set while leased
+    lease_expires_at DOUBLE PRECISION,            -- broker wall clock, set while leased
     result_key       TEXT,                        -- set when done
     context_sha256   TEXT,                        -- NULL: no context (ADR 0012)
     data_class       TEXT,                        -- NULL: treated as footage (ADR 0015)
-    enqueued_at      REAL,                        -- broker wall clock; NULL for rows before ADR 0018
-    done_at          REAL                         -- set by the first accepted completion
+    enqueued_at      DOUBLE PRECISION,            -- broker wall clock; NULL for rows before ADR 0018
+    done_at          DOUBLE PRECISION             -- set by the first accepted completion
 );
 """
 
 # Columns added after the first release, as (name, SQL type). CREATE TABLE IF NOT EXISTS
 # skips a table that already exists, so an older database gets these with ALTER TABLE.
-# Expand only: add nullable columns, never rename or drop, so old rows and older
-# code keep working (Postgres: the same ALTER TABLE ... ADD COLUMN, no table rewrite).
+# Expand only (ADR 0012): add nullable columns, never rename or drop, so old rows and older
+# code (a rolling deploy runs both) keep working. Postgres adds a nullable column without
+# rewriting the table.
 MIGRATIONS = [
     ("context_sha256", "TEXT"),
     ("data_class", "TEXT"),
-    ("enqueued_at", "REAL"),  # ADR 0018: queue age and the enqueue-to-done SLO
-    ("done_at", "REAL"),
+    ("enqueued_at", "DOUBLE PRECISION"),  # ADR 0018: queue age and the enqueue-to-done SLO
+    ("done_at", "DOUBLE PRECISION"),
 ]
+
+# Serves the claim: the oldest available job, in FIFO order, without sorting. Done and dead
+# jobs (the bulk of a long-lived table) are not in it.
+INDEXES = [
+    "CREATE INDEX IF NOT EXISTS jobs_open_seq_idx ON jobs (seq) WHERE state IN ('queued', 'leased')",
+]
+
+# The claim: ONE statement. The CTE picks the oldest available job that matches and locks it;
+# SKIP LOCKED passes over rows another claim holds instead of waiting, so concurrent workers
+# take different jobs. The UPDATE then leases the locked row.
+CLAIM_SQL = """
+WITH candidate AS (
+    SELECT job_id FROM jobs
+    WHERE (state = 'queued' OR (state = 'leased' AND lease_expires_at <= %(now)s))
+      AND attempts < %(max_attempts)s
+      AND COALESCE(data_class, 'footage') = ANY(%(clearance)s)
+      AND prompt_version = ANY(%(capabilities)s)
+      AND model = ANY(%(models)s)
+    ORDER BY seq
+    LIMIT 1
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE jobs SET state = 'leased', lease_token = %(token)s,
+                lease_expires_at = %(expires)s, attempts = attempts + 1
+FROM candidate
+WHERE jobs.job_id = candidate.job_id
+RETURNING jobs.job_id, input_sha256, model, prompt_version,
+          lease_expires_at, attempts, context_sha256
+"""
 
 
 def _digest(lease_token: str) -> str:
     """What the table stores instead of the token (docs/security.md, before phase 4), so a read
     of the database can't take over a lease. Plain SHA-256 is enough: a token has 128 random
     bits, so there's nothing to guess and no salt or slow hash is needed (those protect
-    passwords, which people choose). Rows from before this change are hashed on startup
-    (JobStore._migrate)."""
+    passwords, which people choose)."""
     return hashlib.sha256(lease_token.encode()).hexdigest()
 
 
-def _marks(values: list[str]) -> str:
-    """ "?, ?, ?" for an IN list: only placeholders are formatted into SQL, never values."""
-    return ", ".join("?" * len(values))
+def _configure(conn: Connection) -> None:
+    for name, value in SESSION_SETTINGS.items():  # constants above, never input
+        conn.execute(f"SET {name} = '{value}'")
+
+
+def make_pool(
+    database_url: str, *, timeout: float = POOL_TIMEOUT, max_size: int = POOL_MAX_SIZE
+) -> ConnectionPool:
+    """The app's one pool, already open. Closing it is the owner's job (the app's lifespan).
+
+    The URL holds the password: nothing here puts it in a message or a log line."""
+    try:
+        conninfo_to_dict(database_url)
+    except psycopg.Error:
+        # libpq's message can quote part of the string: say only that it's malformed
+        raise ValueError("the database URL is not a valid PostgreSQL connection string") from None
+    pool = ConnectionPool(
+        database_url,
+        min_size=0,  # no idle connections held while the broker is quiet (it scales to zero)
+        max_size=max_size,
+        timeout=timeout,
+        max_lifetime=POOL_MAX_LIFETIME,
+        check=ConnectionPool.check_connection,  # a dead connection is replaced, not handed out
+        configure=_configure,
+        kwargs={"autocommit": True, "row_factory": dict_row},  # each statement its own transaction
+        name="broker",
+        open=False,
+    )
+    pool.open()
+    return pool
+
+
+def is_unavailable(exc: BaseException) -> bool:
+    """Is this error "the database can't answer right now", where retrying later can help?
+
+    Yes: no connection (refused, dropped, unknown database), no free pooled connection in time,
+    a statement or lock timeout, a restarting or full server. No: everything else (a missing
+    table, a constraint, a bug) is a real fault and stays a 500 (ADR 0020, ADR 0016)."""
+    if isinstance(exc, PoolTimeout | PoolClosed):
+        return True
+    if not isinstance(exc, psycopg.OperationalError):
+        return False
+    state = exc.sqlstate
+    return (
+        state is None  # client side: connection refused, closed, timed out
+        or state.startswith("08")  # connection exception
+        or state
+        in {
+            "57014",  # query_canceled: statement_timeout
+            "55P03",  # lock_not_available: lock_timeout
+            "57P01",  # admin_shutdown
+            "57P02",  # crash_shutdown
+            "57P03",  # cannot_connect_now: starting up or shutting down
+            "53300",  # too_many_connections
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -97,54 +206,30 @@ class QueueStats:
 
 
 class JobStore:
-    def __init__(
-        self,
-        path: str | Path,
-        max_attempts: int = 3,
-        busy_timeout: float = 5.0,
-        wal: bool = False,
-    ) -> None:
+    """Stateless apart from the pool it was given: one instance serves every request."""
+
+    def __init__(self, pool: ConnectionPool, max_attempts: int = 3, migrate: bool = True) -> None:
         # A job leased this many times without completing is a "poison" job: it goes to
         # the 'dead' state for a human to look at instead of being retried forever.
         self.max_attempts = max_attempts
-        # isolation_level=None: autocommit, so each statement is its own atomic transaction.
-        # timeout: wait up to this long for another connection's write lock instead of failing.
-        # check_same_thread=False: FastAPI sets a per-request store up and tears it down on
-        # different pool threads. Safe: one request uses its connection strictly one step at a time.
-        self.db = sqlite3.connect(
-            path, isolation_level=None, timeout=busy_timeout, check_same_thread=False
-        )
-        self.db.row_factory = sqlite3.Row
-        if wal:
-            # Readers no longer block the writer or the reverse (ADR 0016). Persistent in the
-            # database file, so the broker sets it once at startup, not per request.
-            mode = self.db.execute("PRAGMA journal_mode=WAL").fetchone()[0]
-            if mode != "wal":  # e.g. a filesystem without shared memory: SQLite keeps the old mode
-                raise RuntimeError(f"journal_mode=WAL did not take effect (still {mode!r})")
-        self.db.executescript(SCHEMA)
-        self._migrate()
+        self.pool = pool
+        if migrate:
+            self.migrate()
 
-    def _migrate(self) -> None:
-        have = {row["name"] for row in self.db.execute("PRAGMA table_info(jobs)")}
-        for name, sql_type in MIGRATIONS:
-            if name not in have:
+    def migrate(self) -> None:
+        """Create the schema and add missing columns, safe to run on every start and from
+        several instances at once: an advisory lock makes them take turns, so none races
+        another's CREATE or ALTER. (lock_timeout bounds the wait: a stuck migrator fails the
+        next one with a lock error instead of hanging it.) Add-only: see MIGRATIONS."""
+        with self.pool.connection(timeout=MIGRATE_CONNECT_TIMEOUT) as conn, conn.transaction():
+            # xact lock: released at commit or rollback, so a crash can't leave it held
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (MIGRATION_LOCK_KEY,))
+            conn.execute(SCHEMA)
+            for name, sql_type in MIGRATIONS:
                 # name and type come from the constant above, never from input
-                self.db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {sql_type}")
-        # Rows from before lease tokens were hashed hold the token itself (22 characters; a
-        # digest is 64). Hash them in place, so no token is stored anywhere and those leases keep
-        # working. Repeating this finds nothing: it's safe on every startup.
-        old = self.db.execute(
-            "SELECT job_id, lease_token FROM jobs WHERE lease_token IS NOT NULL"
-            " AND length(lease_token) != 64"
-        ).fetchall()
-        for row in old:
-            self.db.execute(
-                "UPDATE jobs SET lease_token = ? WHERE job_id = ? AND lease_token = ?",
-                (_digest(row["lease_token"]), row["job_id"], row["lease_token"]),
-            )
-
-    def close(self) -> None:
-        self.db.close()
+                conn.execute(f"ALTER TABLE jobs ADD COLUMN IF NOT EXISTS {name} {sql_type}")
+            for index in INDEXES:
+                conn.execute(index)
 
     def add(
         self,
@@ -158,14 +243,17 @@ class JobStore:
     ) -> None:
         """Queue a job. Adding the same job_id again is a no-op (idempotent enqueue): the
         first enqueue time stays."""
-        self.db.execute(
-            "INSERT OR IGNORE INTO jobs (job_id, input_sha256, model, prompt_version,"
-            " context_sha256, data_class, enqueued_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (job_id, input_sha256, model, prompt_version, context_sha256, data_class, now),
-        )
+        with self.pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO jobs (job_id, input_sha256, model, prompt_version,"
+                " context_sha256, data_class, enqueued_at) VALUES (%s, %s, %s, %s, %s, %s, %s)"
+                " ON CONFLICT (job_id) DO NOTHING",
+                (job_id, input_sha256, model, prompt_version, context_sha256, data_class, now),
+            )
 
-    def get(self, job_id: str) -> sqlite3.Row | None:
-        return self.db.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+    def get(self, job_id: str) -> dict[str, Any] | None:
+        with self.pool.connection() as conn:
+            return conn.execute("SELECT * FROM jobs WHERE job_id = %s", (job_id,)).fetchone()
 
     def claim(
         self,
@@ -189,29 +277,31 @@ class JobStore:
         token = secrets.token_urlsafe(16)
         clearance, capabilities, models = list(clearance), list(capabilities), list(models)
         if not (clearance and capabilities and models):
-            return None  # nothing can match; also keeps "IN ()" out of the SQL
-        # Dead-letter first: an expired job that used up its attempts must never be
-        # claimed again. Hands nothing out, so it doesn't need to be atomic with the claim.
-        self.db.execute(
-            "UPDATE jobs SET state='dead'"
-            " WHERE state='leased' AND lease_expires_at <= ? AND attempts >= ?",
-            (now, self.max_attempts),
-        )
-        row = self.db.execute(
-            "UPDATE jobs SET state='leased', lease_token=?, lease_expires_at=?, attempts=attempts+1"
-            " WHERE job_id = (SELECT job_id FROM jobs"
-            "   WHERE (state='queued' OR (state='leased' AND lease_expires_at <= ?))"
-            f"   AND COALESCE(data_class, 'footage') IN ({_marks(clearance)})"
-            f"   AND prompt_version IN ({_marks(capabilities)})"
-            f"   AND model IN ({_marks(models)})"
-            "   ORDER BY rowid LIMIT 1)"
-            " RETURNING job_id, input_sha256, model, prompt_version,"
-            "   lease_expires_at, attempts, context_sha256",
-            (_digest(token), now + ttl_seconds, now, *clearance, *capabilities, *models),
-        ).fetchone()
+            return None  # nothing can match
+        with self.pool.connection() as conn:
+            # Dead-letter first: an expired job that used up its attempts must never be
+            # claimed again (the claim also skips it). Hands nothing out, so it doesn't need
+            # to be atomic with the claim.
+            conn.execute(
+                "UPDATE jobs SET state = 'dead'"
+                " WHERE state = 'leased' AND lease_expires_at <= %s AND attempts >= %s",
+                (now, self.max_attempts),
+            )
+            row = conn.execute(
+                CLAIM_SQL,
+                {
+                    "now": now,
+                    "max_attempts": self.max_attempts,
+                    "clearance": clearance,
+                    "capabilities": capabilities,
+                    "models": models,
+                    "token": _digest(token),
+                    "expires": now + ttl_seconds,
+                },
+            ).fetchone()
         if row is None:
             return None
-        return Claim(**dict(row), lease_token=token)  # the only place the token itself goes
+        return Claim(**row, lease_token=token)  # the only place the token itself goes
 
     def heartbeat(
         self, job_id: str, lease_token: str, now: float, ttl_seconds: float
@@ -222,12 +312,13 @@ class JobStore:
         dead-lettered, no row matches and the heartbeat fails. A lease that expired but
         that nobody re-leased yet can still be renewed.
         """
-        row = self.db.execute(
-            "UPDATE jobs SET lease_expires_at = ?"
-            " WHERE job_id = ? AND lease_token = ? AND state = 'leased'"
-            " RETURNING lease_expires_at",
-            (now + ttl_seconds, job_id, _digest(lease_token)),
-        ).fetchone()
+        with self.pool.connection() as conn:
+            row = conn.execute(
+                "UPDATE jobs SET lease_expires_at = %s"
+                " WHERE job_id = %s AND lease_token = %s AND state = 'leased'"
+                " RETURNING lease_expires_at",
+                (now + ttl_seconds, job_id, _digest(lease_token)),
+            ).fetchone()
         return None if row is None else row["lease_expires_at"]
 
     def complete(
@@ -243,42 +334,41 @@ class JobStore:
             "model, prompt_version, COALESCE(data_class, 'footage') AS data_class,"
             " enqueued_at, done_at"
         )
-        # The first completion moves leased -> done, atomically: only one caller can win it.
-        # (Telling "first" apart by time would miscount a retry within the same clock tick.)
-        row = self.db.execute(
-            "UPDATE jobs SET state = 'done', result_key = ?, done_at = ?"
-            " WHERE job_id = ? AND lease_token = ? AND state = 'leased'"
-            f" RETURNING {facts}",
-            (result_key, now, job_id, _digest(lease_token)),
-        ).fetchone()
-        if row is not None:
-            return Completion(**dict(row), first=True)
-        # A repeat of the same completion: accepted, nothing to write.
-        row = self.db.execute(
-            f"SELECT {facts} FROM jobs"
-            " WHERE job_id = ? AND lease_token = ? AND state = 'done' AND result_key = ?",
-            (job_id, _digest(lease_token), result_key),
-        ).fetchone()
-        return None if row is None else Completion(**dict(row), first=False)
+        with self.pool.connection() as conn:
+            # The first completion moves leased -> done, atomically: only one caller can win it.
+            # (Telling "first" apart by time would miscount a retry within the same clock tick.)
+            row = conn.execute(
+                "UPDATE jobs SET state = 'done', result_key = %s, done_at = %s"
+                " WHERE job_id = %s AND lease_token = %s AND state = 'leased'"
+                f" RETURNING {facts}",
+                (result_key, now, job_id, _digest(lease_token)),
+            ).fetchone()
+            if row is not None:
+                return Completion(**row, first=True)
+            # A repeat of the same completion: accepted, nothing to write.
+            row = conn.execute(
+                f"SELECT {facts} FROM jobs"
+                " WHERE job_id = %s AND lease_token = %s AND state = 'done' AND result_key = %s",
+                (job_id, _digest(lease_token), result_key),
+            ).fetchone()
+        return None if row is None else Completion(**row, first=False)
 
     def stats(self, now: float) -> QueueStats:
         """Counts by state and data class, and when the oldest available job was enqueued.
 
-        Read-only, two aggregate queries: cheap enough to run on every metrics export
-        (PostgreSQL: the same GROUP BY; an index on state helps once the table is large)."""
-        counts = {
-            (row["state"], row["data_class"]): row["n"]
-            for row in self.db.execute(
-                "SELECT CASE WHEN state = 'leased' AND lease_expires_at <= ? THEN 'expired'"
+        Read-only, two aggregate queries: cheap enough to run on every metrics export."""
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT CASE WHEN state = 'leased' AND lease_expires_at <= %s THEN 'expired'"
                 "   ELSE state END AS state,"
                 " COALESCE(data_class, 'footage') AS data_class, COUNT(*) AS n"
                 " FROM jobs GROUP BY 1, 2",
                 (now,),
-            )
-        }
-        oldest = self.db.execute(
-            "SELECT MIN(enqueued_at) FROM jobs"
-            " WHERE state = 'queued' OR (state = 'leased' AND lease_expires_at <= ?)",
-            (now,),
-        ).fetchone()[0]
-        return QueueStats(counts, oldest)
+            ).fetchall()
+            oldest = conn.execute(
+                "SELECT MIN(enqueued_at) AS oldest FROM jobs"
+                " WHERE state = 'queued' OR (state = 'leased' AND lease_expires_at <= %s)",
+                (now,),
+            ).fetchone()
+        counts = {(row["state"], row["data_class"]): row["n"] for row in rows}
+        return QueueStats(counts, oldest["oldest"])

@@ -8,30 +8,31 @@ Status codes carry the store's answers (ADR 0007):
 
 Two tokens (ADR 0011): workers can only lease, heartbeat and complete; only the admin token
 can add jobs. Both come from the fleet vault, never from a file:
-  ./scripts/with-secrets.ps1 -Names FLEET_WORKER_TOKEN,FLEET_ADMIN_TOKEN -- \
+  ./scripts/with-secrets.ps1 -Names FLEET_WORKER_TOKEN,FLEET_ADMIN_TOKEN,FLEET_DATABASE_URL -- \
       uv run --directory broker uvicorn fleet_broker.app:app
 (or the image, with Compose: see compose.yaml).
-The database defaults to data/broker.db (git-ignored). Set FLEET_DOCS=1 to serve /docs locally.
+The job store is PostgreSQL (ADR 0020): FLEET_DATABASE_URL is required and holds the password,
+so it is never logged. Set FLEET_DOCS=1 to serve /docs locally.
 """
 
 import hmac
 import logging
 import os
-import sqlite3
 import time
-from collections.abc import Callable, Collection, Iterator
+from collections.abc import Callable, Collection
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Annotated, Literal, get_args
 
+import psycopg
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import jsonlog, telemetry
 from .auth import bearer_matches
 from .bodylimit import BodyLimit
 from .ratelimit import TokenBucket, retry_after
-from .store import JobStore
+from .store import POOL_TIMEOUT, JobStore, is_unavailable, make_pool
 from .telemetry import Metrics
 
 log = logging.getLogger("fleet_broker")
@@ -134,7 +135,7 @@ def _token_sets(
 
 
 def create_app(
-    db_path: str | Path,
+    database: str | ConnectionPool,
     worker_token: str,
     admin_token: str,
     clearance: Collection[str],
@@ -142,7 +143,7 @@ def create_app(
     max_attempts: int = 3,
     clock: Callable[[], float] = time.time,
     docs: bool = False,
-    busy_timeout: float = 5.0,
+    pool_timeout: float = POOL_TIMEOUT,
     metrics: Metrics | None = None,
     tracing: Callable[[FastAPI], Callable[[], None]] | None = None,
     previous_worker_token: str = "",
@@ -150,7 +151,10 @@ def create_app(
     worker_rate: float = 20.0,
     worker_burst: int = 100,
 ) -> FastAPI:
-    """`tracing` instruments the finished app and returns its flush (telemetry.trace_app).
+    """`database`: the PostgreSQL URL, or an open pool made by store.make_pool. The app owns the
+    pool either way: its lifespan closes it, so shutdown (SIGTERM) releases the connections.
+    `pool_timeout`: how long a request waits for a free connection before it gets a 503.
+    `tracing` instruments the finished app and returns its flush (telemetry.trace_app).
     `previous_*_token`: also accepted while a rotation is under way (docs/secrets.md).
     `worker_rate`/`worker_burst`: the worker endpoints' token bucket (ratelimit.py). 20/s is
     far above a GPU fleet's need (a few requests per job, jobs take seconds) and far below a
@@ -166,11 +170,19 @@ def create_app(
             f"got {sorted(clearance)}"
         )
 
+    # Opened here, at startup (a bad URL or an unreachable database stops the broker before it
+    # takes traffic); closed by the lifespan below. Created after the checks above, so a refused
+    # configuration leaves nothing open.
+    pool = make_pool(database, timeout=pool_timeout) if isinstance(database, str) else database
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        yield
-        metrics.shutdown()  # flush the last metrics window on SIGTERM
-        stop_tracing()
+        try:
+            yield
+        finally:
+            pool.close()  # on SIGTERM too: connections end cleanly, not by a dropped socket
+            metrics.shutdown()  # flush the last metrics window on SIGTERM
+            stop_tracing()
 
     # No public API description unless asked for (local development only).
     app = FastAPI(
@@ -180,26 +192,32 @@ def create_app(
         redoc_url=None,
         openapi_url="/openapi.json" if docs else None,
     )
-    # Create the schema and switch to WAL once at startup.
-    JobStore(db_path, max_attempts, busy_timeout, wal=True).close()
+    app.state.pool = pool  # tests look at it; nothing else should
+    # Create the schema once at startup (under an advisory lock: instances starting together
+    # take turns). If it fails the broker doesn't start, and the pool doesn't leak.
+    try:
+        store = JobStore(pool, max_attempts)
+    except BaseException:
+        pool.close()
+        raise
 
-    @app.exception_handler(sqlite3.OperationalError)
-    async def busy(request: Request, exc: sqlite3.OperationalError) -> Response:
-        # Lock starvation is transient: tell the caller to retry (ADR 0016). Anything else
-        # (a missing table, a corrupt file) is a real fault and stays a 500.
-        # SQLITE_BUSY (5): another connection holds the lock, so waiting helps. SQLITE_LOCKED (6)
-        # is a conflict inside one connection, a bug that retrying can't fix. The primary code is
-        # the low byte (extended codes add flags above it). Without a code, match the BUSY text.
-        code = getattr(exc, "sqlite_errorcode", None)
-        if (
-            (code & 0xFF == sqlite3.SQLITE_BUSY)
-            if code is not None
-            else (str(exc) == "database is locked")
-        ):
-            log.warning("database busy on %s %s: %s", request.method, request.url.path, exc)
-            metrics.busy()
-            return Response(status_code=503, headers={"Retry-After": "1"})
-        raise exc
+    @app.exception_handler(psycopg.Error)
+    async def unavailable(request: Request, exc: psycopg.Error) -> Response:
+        # A database that can't answer right now is transient: tell the caller to retry
+        # (ADR 0020, ADR 0016). Anything else (a missing table, a bad query) is a real fault
+        # and stays a 500. Logs the error's class and SQLSTATE only: connection errors can
+        # quote the host and user, and the URL holds the password.
+        if not is_unavailable(exc):
+            raise exc
+        log.warning(
+            "database unavailable on %s %s: %s %s",
+            request.method,
+            request.url.path,
+            type(exc).__name__,
+            getattr(exc, "sqlstate", None),
+        )
+        metrics.busy()
+        return Response(status_code=503, headers={"Retry-After": "1"})
 
     # Bodies without a Content-Length (chunked) are counted as they arrive (bodylimit.py).
     app.add_middleware(BodyLimit, limit=MAX_BODY_BYTES)
@@ -216,16 +234,11 @@ def create_app(
             return Response(status_code=413)
         return await call_next(request)
 
-    def store() -> Iterator[JobStore]:
-        # One SQLite connection per request, never used by two threads at once (setup, endpoint
-        # and teardown may run on different pool threads, but in turn). Opening one costs < 1 ms.
-        s = JobStore(db_path, max_attempts, busy_timeout)
-        try:
-            yield s
-        finally:
-            s.close()
+    def get_store() -> JobStore:
+        # One store for the app: it holds no connection, each method borrows one from the pool.
+        return store
 
-    Store = Annotated[JobStore, Depends(store)]
+    Store = Annotated[JobStore, Depends(get_store)]
     # Two buckets: heartbeats get their own, so a worker hot-looping on /lease (a bug, or a leaked
     # token) can't make the other workers' heartbeats fail and cost them their running jobs.
     polls = TokenBucket(worker_rate, worker_burst, clock)
@@ -303,8 +316,11 @@ def _from_env() -> FastAPI | None:
         raise ValueError(
             f"FLEET_WORKER_CLEARANCE must be a comma list from {sorted(DATA_CLASSES)}, got {raw!r}"
         )
-    db = Path(os.environ.get("FLEET_DB", "data/broker.db"))
-    db.parent.mkdir(parents=True, exist_ok=True)
+    # Required too (ADR 0020). Never echoed: it holds the database password.
+    database_url = os.environ.get("FLEET_DATABASE_URL", "")
+    if not database_url:
+        raise ValueError("FLEET_DATABASE_URL is required (a postgresql:// URL)")
+    pool = make_pool(database_url)
     flush_logs = telemetry.export_logs()  # a no-op without the [otel] extra and an endpoint
     # Set only while a rotation is under way (docs/secrets.md "Rotating broker tokens").
     previous_worker = os.environ.get("FLEET_WORKER_TOKEN_PREVIOUS", "")
@@ -321,12 +337,14 @@ def _from_env() -> FastAPI | None:
         return stop
 
     return create_app(
-        db,
+        pool,
         worker_token,
         admin_token,
         clearance,
         docs=os.environ.get("FLEET_DOCS") == "1",
-        metrics=telemetry.setup(db, time.time),
+        # The metrics thread reads the gauges through the app's own pool (the schema is made by
+        # create_app before the first export).
+        metrics=telemetry.setup(JobStore(pool, migrate=False), time.time),
         tracing=tracing,
         previous_worker_token=previous_worker,
         previous_admin_token=previous_admin,

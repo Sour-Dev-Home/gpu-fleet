@@ -10,7 +10,7 @@ updated to point to it.
 | [0002](0002-pull-based-broker.md) | Pull-based broker; workers never hold cloud keys | Accepted |
 | [0003](0003-content-addressed-results.md) | Content-addressed, idempotent results | Accepted |
 | [0004](0004-lease-durations-and-clocks.md) | Leases carry durations; worker clock; renew at 2/3 of TTL | Accepted |
-| [0005](0005-sqlite-job-store.md) | SQLite job store for the local phases; atomic claim | Accepted |
+| [0005](0005-sqlite-job-store.md) | SQLite job store for the local phases; atomic claim | Superseded by 0020 |
 | [0006](0006-lease-lifecycle.md) | Token is ownership; lazy expiry; dead letters; idempotent complete | Accepted |
 | [0007](0007-http-contract-and-auth.md) | HTTP status-code contract; interim bearer-token auth | Accepted |
 | [0008](0008-short-polling-with-backoff.md) | Short polling with exponential backoff and jitter | Accepted |
@@ -21,9 +21,10 @@ updated to point to it.
 | [0013](0013-dev-tooling-scripts.md) | Repo scripts for checking, shipping and mutation testing | Accepted |
 | [0014](0014-container-images-and-compose.md) | Container images and Compose; model server outside the worker; background heartbeat | Accepted |
 | [0015](0015-data-class-clearance-capabilities.md) | Data class, clearance and capabilities decide which worker may lease a job | Accepted (phase 3, step 1) |
-| [0016](0016-sqlite-busy-handling.md) | SQLite busy handling: WAL, 503 with Retry-After, client retries | Accepted |
+| [0016](0016-sqlite-busy-handling.md) | SQLite busy handling: WAL, 503 with Retry-After, client retries | Accepted; SQLite parts superseded by 0020 |
 | [0017](0017-terraform-aws-layout-and-state.md) | Terraform for AWS: two stacks, S3 state with native locking, keyless sign-in | Accepted |
 | [0018](0018-observability-opentelemetry.md) | Observability with OpenTelemetry: metrics, logs and traces | Accepted (phase 3b) |
 | [0019](0019-public-broker-on-cloud-run.md) | Public broker on Cloud Run: app tokens, keyless AWS access, phase 4 order | Accepted (phase 4) |
+| [0020](0020-postgres-job-store.md) | PostgreSQL job store: pool, SKIP LOCKED claim, advisory-locked migrations, 503 on connection errors | Accepted (phase 4, step 2) |
 
 Template: Status, Date, Context, Decision, Consequences, Alternatives considered. Keep each one to a page.

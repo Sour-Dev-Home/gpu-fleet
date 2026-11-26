@@ -18,7 +18,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path $PSScriptRoot -Parent)
-$tokenNames = 'FLEET_WORKER_TOKEN', 'FLEET_ADMIN_TOKEN'
+$tokenNames = 'FLEET_WORKER_TOKEN', 'FLEET_ADMIN_TOKEN', 'FLEET_DB_PASSWORD'
 
 function Write-Step($text) { Write-Host "`n== $text" -ForegroundColor Cyan }
 
@@ -31,12 +31,11 @@ function Invoke-Compose {
 }
 
 function Get-JobCounts {
-  $py = "import sqlite3; c=sqlite3.connect('/data/broker.db'); " +
-        "print(dict(c.execute('SELECT state, count(*) FROM jobs GROUP BY state').fetchall()))"
-  $out = & docker compose exec -T broker python -c $py
+  # psql inside the postgres container, over its socket (no password, no published port).
+  $out = & docker compose exec -T postgres psql -U fleet -d fleet -At -F ' ' -c 'SELECT state, count(*) FROM jobs GROUP BY state'
   if ($LASTEXITCODE -ne 0) { throw 'could not read the job store' }
   $counts = @{ queued = 0; leased = 0; done = 0; dead = 0 }
-  foreach ($m in [regex]::Matches("$out", "'(\w+)': (\d+)")) { $counts[$m.Groups[1].Value] = [int]$m.Groups[2].Value }
+  foreach ($m in [regex]::Matches("$out", '(\w+) (\d+)')) { $counts[$m.Groups[1].Value] = [int]$m.Groups[2].Value }
   $counts
 }
 
@@ -90,7 +89,10 @@ try {
   foreach ($n in $tokenNames) {
     if (-not (Get-SecretInfo -Vault fleet -Name $n)) {
       Write-Host "  creating $n in the fleet vault (random, 32 bytes)"
-      Set-Secret -Vault fleet -Name $n -Secret ([Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)))
+      $bytes = [Security.Cryptography.RandomNumberGenerator]::GetBytes(32)
+      # The database password goes into a URL: hex, because base64's + / = would break it (docs/secrets.md).
+      $value = if ($n -eq 'FLEET_DB_PASSWORD') { [Convert]::ToHexString($bytes) } else { [Convert]::ToBase64String($bytes) }
+      Set-Secret -Vault fleet -Name $n -Secret $value
     }
     Set-Item "env:$n" (Get-Secret -Vault fleet -Name $n -AsPlainText)
   }

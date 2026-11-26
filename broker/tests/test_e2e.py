@@ -1,9 +1,9 @@
 """The phase 0 worker loop against the real broker API (in process, over HTTP semantics)."""
 
 import pytest
+from conftest import make_store
 from fastapi.testclient import TestClient
 from fleet_broker.app import create_app
-from fleet_broker.store import JobStore
 from fleet_worker.http_broker import HttpBroker
 from fleet_worker.loop import LeaseLost, Worker
 from fleet_worker.protocol import result_key
@@ -38,9 +38,9 @@ class DictStore:
 
 
 @pytest.fixture
-def fleet(tmp_path):
+def fleet(db_url):
     clock = Clock()
-    app = create_app(tmp_path / "broker.db", WORKER, ADMIN, ALL, ttl_seconds=60, clock=clock)
+    app = create_app(db_url, WORKER, ADMIN, ALL, ttl_seconds=60, clock=clock)
     http = TestClient(app, headers={"Authorization": f"Bearer {WORKER}"})
     admin = TestClient(app, headers={"Authorization": f"Bearer {ADMIN}"})
     store = DictStore()
@@ -64,11 +64,7 @@ def fleet(tmp_path):
         )
 
     def row(job_id: str):
-        s = JobStore(tmp_path / "broker.db")
-        try:
-            return s.get(job_id)
-        finally:
-            s.close()
+        return make_store(db_url).get(job_id)
 
     return clock, add, worker, store, row
 
@@ -131,9 +127,9 @@ def test_worker_that_stalls_loses_the_job_to_another(fleet):
     assert row("j0")["attempts"] == 2
 
 
-def test_context_reaches_the_worker_and_keys_its_result(tmp_path):
+def test_context_reaches_the_worker_and_keys_its_result(db_url):
     clock = Clock()
-    app = create_app(tmp_path / "broker.db", WORKER, ADMIN, ALL, ttl_seconds=60, clock=clock)
+    app = create_app(db_url, WORKER, ADMIN, ALL, ttl_seconds=60, clock=clock)
     admin = TestClient(app, headers={"Authorization": f"Bearer {ADMIN}"})
     http = TestClient(app, headers={"Authorization": f"Bearer {WORKER}"})
     ctx = "c" * 64

@@ -1,20 +1,49 @@
-# Local stack: one broker and N workers (ADR 0014). Tokens come only from the environment (the vault):
-#   ./scripts/with-secrets.ps1 -Names FLEET_WORKER_TOKEN,FLEET_ADMIN_TOKEN -- docker compose up
+# Local stack: PostgreSQL, one broker and N workers (ADR 0014, ADR 0020). Secrets come only from the environment (the vault):
+#   ./scripts/with-secrets.ps1 -Names FLEET_WORKER_TOKEN,FLEET_ADMIN_TOKEN,FLEET_DB_PASSWORD -- docker compose up
+# FLEET_DB_PASSWORD: generate it into the vault once, as hex (docs/secrets.md).
 # Add jobs for the workers' runner (a job no worker can run stays queued, ADR 0015):
 #   echo (default):     docker compose run --rm broker fleet-enqueue --demo 20   (echo-v1)
 #   FLEET_RUNNER=smoke: docker compose run --rm broker fleet-enqueue --demo 20 --prompt-version smoke-v1
 # More workers: docker compose up --scale worker=3
 # With Grafana, metrics, logs and traces (ADR 0018): add -f compose.yaml -f compose.obs.yaml (see that file).
-# No .env or secrets files: both would put tokens on disk.
+# No .env or secrets files: both would put secrets on disk.
 
 services:
+  postgres:
+    # The job store (ADR 0020). Pinned by digest (the multi-arch index of postgres:18, the major version Cloud SQL uses); Dependabot's docker
+    # ecosystem bumps it. No `ports:` on purpose: only the broker, on this Compose network, can reach it.
+    image: postgres:18@sha256:c699303802144847d238196173655dbbecf7a96aeca1565f2b02eb671a1f0b6b
+    environment:
+      POSTGRES_USER: fleet
+      POSTGRES_DB: fleet
+      # Only applies when the data volume is first created (docs/secrets.md). Compose refuses to start without it.
+      POSTGRES_PASSWORD: ${FLEET_DB_PASSWORD:?set FLEET_DB_PASSWORD, e.g. via scripts/with-secrets.ps1}
+    volumes:
+      # postgres:18+ keeps its version-specific data directory under /var/lib/postgresql (not .../data)
+      - postgres-data:/var/lib/postgresql # job store survives restarts and rebuilds
+    healthcheck:
+      # Over the socket, inside the container: no password and no network involved.
+      test: ["CMD-SHELL", "pg_isready -U fleet -d fleet"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+      start_interval: 1s
+    restart: unless-stopped
+    stop_grace_period: 30s # a clean shutdown checkpoint, not crash recovery on the next start
+
   broker:
     build: ./broker
     image: fleet-broker:local
+    depends_on:
+      postgres:
+        condition: service_healthy # the broker migrates the schema at startup: the database must be up
     environment:
-      # ${VAR:?msg} makes Compose refuse to start when a token is missing, instead of running without auth.
+      # ${VAR:?msg} makes Compose refuse to start when a secret is missing, instead of running without auth.
       FLEET_WORKER_TOKEN: ${FLEET_WORKER_TOKEN:?set FLEET_WORKER_TOKEN, e.g. via scripts/with-secrets.ps1}
       FLEET_ADMIN_TOKEN: ${FLEET_ADMIN_TOKEN:?set FLEET_ADMIN_TOKEN, e.g. via scripts/with-secrets.ps1}
+      # Holds the password, so the broker never logs it (ADR 0020). The password is hex: safe in a URL.
+      FLEET_DATABASE_URL: postgresql://fleet:${FLEET_DB_PASSWORD:?set FLEET_DB_PASSWORD, e.g. via scripts/with-secrets.ps1}@postgres:5432/fleet
       # Which data classes the worker token may lease (ADR 0015). Config, not a secret; required by the
       # broker. Every local worker is the maintainer's, so all three. Volunteer tokens get `open` only.
       FLEET_WORKER_CLEARANCE: footage,derived,open
@@ -23,8 +52,6 @@ services:
       FLEET_BROKER_URL: http://broker:8000
     ports:
       - "127.0.0.1:8000:8000" # loopback only: never exposed to the LAN
-    volumes:
-      - broker-data:/data # SQLite job store survives restarts and rebuilds
     healthcheck:
       # python:3.11-slim has no curl; urlopen raises (exit 1) on a refused connection or an error status.
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
@@ -33,7 +60,7 @@ services:
       retries: 3
       start_period: 10s
       start_interval: 1s
-    restart: unless-stopped # back after a crash or a Docker restart; the job store is on the volume
+    restart: unless-stopped # back after a crash or a Docker restart; the job store is in postgres-data
 
   worker:
     build: ./worker
@@ -65,5 +92,5 @@ services:
       replicas: 1 # docker compose up --scale worker=N for more
 
 volumes:
-  broker-data:
+  postgres-data:
   results:

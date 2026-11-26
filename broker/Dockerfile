@@ -1,5 +1,6 @@
-# Fleet broker image (ADR 0014): the HTTP API under uvicorn, SQLite at /data/broker.db.
-# Needs FLEET_WORKER_TOKEN and FLEET_ADMIN_TOKEN from the environment (the vault), never from a file.
+# Fleet broker image (ADR 0014): the HTTP API under uvicorn, job store in PostgreSQL (ADR 0020).
+# Needs FLEET_WORKER_TOKEN, FLEET_ADMIN_TOKEN and FLEET_DATABASE_URL (it holds the database password)
+# from the environment (the vault), never from a file.
 # The same image adds jobs: docker compose run --rm broker fleet-enqueue --demo N
 #
 #   docker build -t fleet-broker broker
@@ -39,8 +40,7 @@ RUN useradd -l --uid 10001 --user-group --no-create-home --shell /usr/sbin/nolog
 # Only the virtualenv: no uv, no sources, no build cache.
 COPY --from=build /app/.venv /app/.venv
 ENV PATH=/app/.venv/bin:$PATH \
-    PYTHONUNBUFFERED=1 \
-    FLEET_DB=/data/broker.db
+    PYTHONUNBUFFERED=1
 WORKDIR /data
 USER 10001
 EXPOSE 8000
