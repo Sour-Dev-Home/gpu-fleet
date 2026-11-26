@@ -159,3 +159,41 @@ import. CI adds tflint (checksum-verified download); Dependabot gets a terraform
 **Numbers:** 2 stacks, 17 managed resources: 8 bootstrap, 8 fleet, and 1 imported budget. Cost: a few
 cents a month of S3 storage and requests, within credits. Final plan: "No changes." Tests: broker 125,
 worker 94, scripts 21. Checkpoint: 2 of 4 right, 1 partly, 1 explained.
+
+## Phase 3b: observability with OpenTelemetry (2026-11-25)
+
+**Built:** ADR 0018 in five PRs (#32-#36). JSON logs on stdout with Cloud Logging field names and an extras
+allowlist; broker metrics (queue gauges read from the database, completion and lease counters, a turnaround
+histogram with 900 s as a bucket edge); traces across worker and broker joined by W3C `traceparent`; the
+`grafana/otel-lgtm` stack as the override file `compose.obs.yaml`, with logs also sent over OTLP to Loki; and a
+provisioned Fleet dashboard, two alerts (dead letters; oldest queued job over 10 minutes) and the SLO (95% done
+within 15 minutes) as code. A security review hardened telemetry: no peer IPs or user agents on spans,
+exception type only, `traceparent` honoured only with the worker token, plain-http export only to loopback
+unless opted in, uvicorn's access log off.
+
+**Learned:**
+- Metrics are sampled snapshots, traces record each event. 20 echo jobs finished between two 15 s exports,
+  so the graph jumped from queued to done while Tempo showed every job to the millisecond.
+- Gauges describing shared state take `max` across instances; counters of separate events take `sum`. A
+  broker restart left two instances' series and `sum` showed "done 45" for 25 jobs.
+- Zero and missing are different signals. The age gauge reports 0 for an empty queue, so no data means the
+  broker went quiet, and the stuck alert fires on it.
+- An SLO over finished jobs can't see jobs that never finish; an age alert covers that gap.
+- Cardinality: `job_id` goes on spans and logs, never on a metric label.
+- Dashboards as code: provisioned read-only, reviewed in PRs, and a drift test catches renamed metrics.
+
+**Surprises:**
+- The live run found what 283 tests missed: httpx logged every request URL (presigned URLs are
+  credentials), gauges for emptied states went stale, and OTel's log handler exported every extra field.
+- `grafana/otel-lgtm` enables anonymous Admin by default; loopback-only isn't enough when any web page in
+  the browser can reach 127.0.0.1.
+- `TestClient` runs the app in-process, so the worker's current span leaked into the broker through
+  contextvars and a mutant survived until the test ran the broker in a separate context.
+- Sampler-time scrubbing can't work: attributes are set after the span starts, so scrubbing moved to the
+  exporter.
+- FastAPI depends on `opentelemetry-api` on its own; the [otel] extra is what adds the SDK.
+
+**Numbers:** 5 PRs, about one day. Local stack: lgtm image 3.8 GB, broker 232 MB, worker 213 MB. Live check:
+SLO 1.0 over 25 echo jobs; dead-letter alert fired on its first evaluation; queue-stuck went pending at
+600 s and firing 2 minutes later. Cost $0 (all local). Tests: broker 152, worker 107, scripts 32. Checkpoint:
+explained all four, then 2 of 3 on the recap (missed: no data means the broker stopped, not an empty queue).
