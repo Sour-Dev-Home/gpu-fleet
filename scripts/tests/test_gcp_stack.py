@@ -71,7 +71,10 @@ def test_images_are_pinned_by_digest():
 
 def test_no_secret_version_and_no_root_password():
     text = all_code()
-    assert "google_secret_manager_secret_version" not in text
+    # Terraform writes no secret value. The one exception: the two Grafana account identifiers (not secrets,
+    # ADR 0027), pinned by test_grafana_export_stack.
+    versions = re.findall(r'resource "google_secret_manager_secret_version" "(\w+)"', text)
+    assert sorted(versions) == ["grafana_instance_id", "grafana_otlp_endpoint"]
     assert "root_password" not in text
 
 

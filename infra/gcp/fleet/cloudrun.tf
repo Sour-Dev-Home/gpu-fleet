@@ -110,13 +110,39 @@ resource "google_cloud_run_v2_service" "broker" {
       }
 
       # Grafana Cloud export (ADR 0027, grafana.tf): none of these exist unless var.grafana_export is true.
-      # The endpoint, the instance ID and the flush identity are plain values (sensitive variables), the
-      # token is a secret reference. The broker builds the Authorization header at startup.
+      # The flush audience and identity are plain, non-sensitive values. The broker builds the Authorization
+      # header at startup.
       dynamic "env" {
         for_each = local.grafana_env_names
         content {
           name  = env.key
           value = local.grafana_env[env.key]
+        }
+      }
+      # The endpoint and the instance ID are secret references pinned to the Terraform-managed versions
+      # (grafana.tf): no sensitive value sits in the env set, so the plan shows every entry.
+      dynamic "env" {
+        for_each = var.grafana_export ? [1] : []
+        content {
+          name = "OTEL_EXPORTER_OTLP_ENDPOINT"
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.grafana_otlp_endpoint[0].secret_id
+              version = google_secret_manager_secret_version.grafana_otlp_endpoint[0].version
+            }
+          }
+        }
+      }
+      dynamic "env" {
+        for_each = var.grafana_export ? [1] : []
+        content {
+          name = "FLEET_GRAFANA_INSTANCE_ID"
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.grafana_instance_id[0].secret_id
+              version = google_secret_manager_secret_version.grafana_instance_id[0].version
+            }
+          }
         }
       }
       dynamic "env" {
@@ -214,6 +240,8 @@ resource "google_cloud_run_v2_service" "broker" {
     google_project_iam_member.sql_instance_user,
     google_secret_manager_secret_iam_member.broker_reads,
     google_secret_manager_secret_iam_member.broker_reads_grafana,
+    google_secret_manager_secret_iam_member.broker_reads_grafana_otlp_endpoint,
+    google_secret_manager_secret_iam_member.broker_reads_grafana_instance_id,
     google_sql_user.broker,
   ]
 }

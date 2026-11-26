@@ -319,6 +319,14 @@ $add = "import os,shutil,subprocess,sys; subprocess.run([shutil.which('gcloud'),
 environment has none of the Grafana settings, the job does not exist, and the two `TF_VAR_grafana_*` names are not
 needed. With it true and either value missing, the plan fails with a clear message.
 
+**What the plan shows.** The OTLP endpoint and the instance ID are identifiers, not secrets, so Terraform stores them
+in two Secret Manager secrets WITH their versions (`fleet-grafana-otlp-endpoint`, `fleet-grafana-instance-id`; the values
+sit in the private state) and the broker reads them as secret references pinned to those versions. That keeps one
+sensitive value from turning the whole `env` set into "(sensitive value)": the plan shows every env name, the
+non-sensitive values and the secret references, and only the two `google_secret_manager_secret_version` resources show
+`secret_data` as (sensitive). Still one apply. A changed endpoint or ID makes a new version and so a new revision.
+The broker reads `os.environ`, so it does not care how Cloud Run fills the variable.
+
 **Verify:** `gcloud scheduler jobs run fleet-telemetry-flush --location us-central1`, then
 `gcloud run services logs read fleet-broker --region us-central1` (a flush is a `POST /telemetry/flush` with 204) and
 Grafana Explore for `service_name="fleet-broker"`. The deployer needs Cloud Scheduler Admin and Service Account
