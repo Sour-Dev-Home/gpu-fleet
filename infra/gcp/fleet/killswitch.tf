@@ -72,7 +72,7 @@ resource "google_cloud_run_v2_service" "killswitch" {
   location = var.region
 
   # Internal only: Google documents Pub/Sub push to an internal-only Cloud Run service in the same project as
-  # allowed. UNVERIFIED until the drill is re-run after this change (README). There is also NO allUsers binding,
+  # allowed; confirmed by the re-drill on 2026-11-26 (ADR 0024). There is also NO allUsers binding,
   # so only a caller with an invoker token (the push subscription's service account) gets in.
   ingress             = "INGRESS_TRAFFIC_INTERNAL_ONLY"
   deletion_protection = true

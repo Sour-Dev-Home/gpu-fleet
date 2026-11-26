@@ -129,12 +129,12 @@ def test_the_two_apis_are_enabled():
     assert '"billingbudgets.googleapis.com"' in m and '"pubsub.googleapis.com"' in m
 
 
-def test_killswitch_ingress_is_internal_only_and_marked_unverified():
+def test_killswitch_ingress_is_internal_only_and_its_drill_is_recorded():
     b = res("google_cloud_run_v2_service", "killswitch")
     assert re.search(r'(?m)^\s*ingress\s*=\s*"INGRESS_TRAFFIC_INTERNAL_ONLY"', b)
     raw = (STACK / "killswitch.tf").read_text(encoding="utf-8")
     head = raw[: raw.index('ingress             = "INGRESS_TRAFFIC_INTERNAL_ONLY"')]
-    assert "UNVERIFIED" in head[-600:]
+    assert "confirmed by the re-drill" in head[-600:]
     readme = (STACK / "README.md").read_text(encoding="utf-8")
     assert "re-run the drill" in readme.lower() and "internal-only" in readme
     adr = (ROOT / "docs/adr/0024-budget-kill-switch.md").read_text(encoding="utf-8")

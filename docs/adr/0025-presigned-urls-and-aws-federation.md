@@ -124,6 +124,12 @@ variable carries them. The audience is the variable `aws_federation_audience` (a
 stack's `federation_audience`). `s3_mode` (default true) sets or removes all four settings together: a rollback is
 `-var s3_mode=false`, no code change, and it skips the remote state read.
 
+**First run (2026-11-26).** The broker fetches AWS credentials at startup, so revision 2 becoming Ready was the first
+successful federation (`:sub`, `:aud` and `:oaud` all matched). A cloud smoke test then ran one `open` job end to
+end: enqueue 201; lease 200 with an `input_url` on exactly the bucket's host; presigned GET 200 with a matching
+SHA-256; `/upload-url` 200; PUT 200; a second PUT refused by S3 (412); `/complete` 204 after the broker's HEAD
+check; test objects deleted.
+
 ## Alternatives considered
 - **Workers with AWS keys, or a shared key in the image:** the thing ADR 0002 exists to avoid; revocation means
   rotating every worker.
