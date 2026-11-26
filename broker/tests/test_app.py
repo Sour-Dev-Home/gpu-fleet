@@ -341,6 +341,8 @@ def test_a_lock_timeout_is_503(db_url):
         psycopg.errors.AdminShutdown("restarting"),
         psycopg.errors.CannotConnectNow("starting up"),
         psycopg.errors.TooManyConnections("too many"),
+        psycopg.errors.DeadlockDetected("deadlock"),  # 40P01: transient, the retry succeeds
+        psycopg.errors.SerializationFailure("serialization"),  # 40001
     ],
     ids=lambda e: type(e).__name__,
 )

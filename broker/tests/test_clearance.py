@@ -216,6 +216,22 @@ def test_from_env_refuses_to_start_without_a_database_url(monkeypatch, db_url):
         _from_env()
 
 
+@pytest.mark.parametrize("which", ["weak worker token", "bad rate", "bad clearance"])
+def test_a_refused_config_leaves_no_pool_open(monkeypatch, db_url, which):
+    import conftest
+
+    env(monkeypatch, db_url, "open")
+    if which == "weak worker token":
+        monkeypatch.setenv("FLEET_WORKER_TOKEN", "short")
+    elif which == "bad rate":
+        monkeypatch.setenv("FLEET_WORKER_RATE", "0")
+    else:
+        monkeypatch.setenv("FLEET_WORKER_CLEARANCE", "secret")
+    with pytest.raises(ValueError):
+        _from_env()
+    assert all(pool.closed for pool in conftest._POOLS)
+
+
 def test_a_real_broker_writes_no_access_log(monkeypatch, db_url):
     # One line per request with the caller's IP: personal data for every volunteer (ADR 0018).
     import logging

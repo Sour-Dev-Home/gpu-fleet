@@ -55,7 +55,7 @@ PG_IMAGE=postgres:18@sha256:c699303802144847d238196173655dbbecf7a96aeca1565f2b02
 pg_container=""
 stop_pg() {
   if [ -n "$pg_container" ]; then
-    docker rm -f -v "$pg_container" >/dev/null 2>&1
+    docker rm -f -v "$pg_container" >/dev/null # stderr stays visible: a failed cleanup must show
     pg_container=""
   fi
 }
@@ -64,16 +64,17 @@ if [ -z "${FLEET_TEST_DATABASE_URL:-}" ]; then
     echo "docker is needed for the broker tests (a throwaway postgres), or set FLEET_TEST_DATABASE_URL" >&2
     exit 1
   }
-  # EXIT covers normal ends and failures; INT/TERM turn a Ctrl-C into an exit, so EXIT runs too.
+  # EXIT covers normal ends and failures; INT/TERM/HUP turn a Ctrl-C, kill or closed terminal into
+  # an exit, so EXIT runs too.
   trap stop_pg EXIT
-  trap 'exit 130' INT TERM
+  trap 'exit 130' INT TERM HUP
   # A random password, in this process's environment only (docker reads POSTGRES_PASSWORD by name,
   # so it never appears in a command line); the container is reachable on loopback only, and lives
   # minutes.
   PGPW=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
   pg_container="fleet-check-pg-$$-$RANDOM"
   # fsync=off: a database that is thrown away needs no durability, and it makes the tests faster.
-  if ! POSTGRES_PASSWORD="$PGPW" docker run -d --name "$pg_container" -e POSTGRES_PASSWORD \
+  if ! POSTGRES_PASSWORD="$PGPW" docker run -d --rm --name "$pg_container" -e POSTGRES_PASSWORD \
       -p 127.0.0.1::5432 "$PG_IMAGE" -c fsync=off -c synchronous_commit=off -c full_page_writes=off \
       >/dev/null; then
     echo "could not start the throwaway postgres" >&2

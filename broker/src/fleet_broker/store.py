@@ -164,6 +164,8 @@ def is_unavailable(exc: BaseException) -> bool:
             "57P02",  # crash_shutdown
             "57P03",  # cannot_connect_now: starting up or shutting down
             "53300",  # too_many_connections
+            "40P01",  # deadlock_detected: one side is rolled back, the retry succeeds
+            "40001",  # serialization_failure: likewise
         }
     )
 

@@ -69,6 +69,12 @@ more than 60 times the need; the pool is there for bursts and for a slow query, 
 - A failed migration stops the broker at startup (it does not serve with a half-made schema). The advisory lock is
   transaction-scoped, so a crashed migrator cannot leave it held.
 - Backups, high availability, IAM auth and the connector are step 4's decisions.
+- Local SQLite jobs are not migrated. The old `broker-data` volume is orphaned: re-enqueue what you need, and
+  remove it with `docker volume rm gpu-fleet_broker-data` when ready.
+- Dependabot's docker-compose ecosystem bumps only `compose.yaml`'s postgres digest. `ci.yml` and `check.sh` must be
+  updated in the same PR; `test_postgres_pin.py` fails until they are.
+- `psycopg-binary` bundles libpq and OpenSSL: their fixes arrive only with a new wheel, delayed by the 7-day
+  Dependabot cooldown. Accepted for now.
 
 ## Alternatives considered
 - **Neon (serverless Postgres):** free tier and scale-to-zero suit a hobby project, but a cold start adds

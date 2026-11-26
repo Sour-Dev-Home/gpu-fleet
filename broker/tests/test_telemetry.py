@@ -6,8 +6,14 @@ from conftest import make_store
 from fastapi.testclient import TestClient
 from fleet_broker import telemetry
 from fleet_broker.app import create_app
+from fleet_broker.store import JobStore
 from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from opentelemetry.sdk.metrics.export import (
+    InMemoryMetricReader,
+    MetricExporter,
+    MetricExportResult,
+    PeriodicExportingMetricReader,
+)
 from tokens import ADMIN, WORKER
 
 NOW = 1_800_000_000.0
@@ -219,3 +225,51 @@ def test_on_with_an_endpoint(db_url):
         assert telemetry.metrics_endpoint(env) == "http://127.0.0.1:9/v1/metrics"
     finally:
         m.provider.shutdown(timeout_millis=1)  # nothing listens on port 9: don't wait on it
+
+
+class Collect(MetricExporter):
+    """Keeps what the reader exports, so a test can read the final export."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.exported = []
+
+    def export(self, metrics_data, timeout_millis=10_000, **kwargs):
+        self.exported.append(metrics_data)
+        return MetricExportResult.SUCCESS
+
+    def force_flush(self, timeout_millis=10_000):
+        return True
+
+    def shutdown(self, timeout_millis=30_000, **kwargs):
+        pass
+
+
+def test_the_last_export_on_shutdown_still_reads_the_gauges(db_url):
+    # SIGTERM: the final collection calls the gauge callbacks, which query the database through
+    # the app's pool. The pool must close AFTER the metrics shut down, or the last window is lost.
+    exporter, errors, holder = Collect(), [], {}
+
+    def stats():
+        try:
+            return NOW, JobStore(holder["app"].state.pool, migrate=False).stats(NOW)
+        except Exception as e:
+            errors.append(e)
+            raise
+
+    reader = PeriodicExportingMetricReader(exporter, export_interval_millis=3_600_000)
+    metrics = telemetry.OtelMetrics(MeterProvider(metric_readers=[reader]), stats)
+    holder["app"] = create_app(db_url, WORKER, ADMIN, {"open"}, metrics=metrics)
+    with TestClient(holder["app"]) as client:
+        add(client, "a")
+    assert errors == []
+    final = [
+        point
+        for data in exporter.exported
+        for rm in data.resource_metrics
+        for sm in rm.scope_metrics
+        for m in sm.metrics
+        if m.name == "fleet.jobs"
+        for point in m.data.data_points
+    ]
+    assert sum(p.value for p in final) == 1  # the queued job, read from the database

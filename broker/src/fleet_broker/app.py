@@ -180,9 +180,12 @@ def create_app(
         try:
             yield
         finally:
-            pool.close()  # on SIGTERM too: connections end cleanly, not by a dropped socket
-            metrics.shutdown()  # flush the last metrics window on SIGTERM
-            stop_tracing()
+            # Metrics first: the last collection calls gauge callbacks that query the pool.
+            try:
+                metrics.shutdown()  # flush the last metrics window on SIGTERM
+                stop_tracing()
+            finally:
+                pool.close()  # on SIGTERM too: connections end cleanly, not by a dropped socket
 
     # No public API description unless asked for (local development only).
     app = FastAPI(
@@ -336,22 +339,26 @@ def _from_env() -> FastAPI | None:
 
         return stop
 
-    return create_app(
-        pool,
-        worker_token,
-        admin_token,
-        clearance,
-        docs=os.environ.get("FLEET_DOCS") == "1",
-        # The metrics thread reads the gauges through the app's own pool (the schema is made by
-        # create_app before the first export).
-        metrics=telemetry.setup(JobStore(pool, migrate=False), time.time),
-        tracing=tracing,
-        previous_worker_token=previous_worker,
-        previous_admin_token=previous_admin,
-        # Optional overrides of the worker rate limit; TokenBucket refuses non-positive values.
-        worker_rate=float(os.environ.get("FLEET_WORKER_RATE", "20")),
-        worker_burst=int(os.environ.get("FLEET_WORKER_BURST", "100")),
-    )
+    try:
+        return create_app(
+            pool,
+            worker_token,
+            admin_token,
+            clearance,
+            docs=os.environ.get("FLEET_DOCS") == "1",
+            # The metrics thread reads the gauges through the app's own pool (the schema is made
+            # by create_app before the first export).
+            metrics=telemetry.setup(JobStore(pool, migrate=False), time.time),
+            tracing=tracing,
+            previous_worker_token=previous_worker,
+            previous_admin_token=previous_admin,
+            # Optional overrides of the worker rate limit; TokenBucket refuses non-positive values.
+            worker_rate=float(os.environ.get("FLEET_WORKER_RATE", "20")),
+            worker_burst=int(os.environ.get("FLEET_WORKER_BURST", "100")),
+        )
+    except BaseException:
+        pool.close()  # a refused configuration (weak token, bad rate) leaves no pool or threads
+        raise
 
 
 app = _from_env()

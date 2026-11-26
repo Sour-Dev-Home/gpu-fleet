@@ -22,8 +22,9 @@ services:
       # postgres:18+ keeps its version-specific data directory under /var/lib/postgresql (not .../data)
       - postgres-data:/var/lib/postgresql # job store survives restarts and rebuilds
     healthcheck:
-      # Over the socket, inside the container: no password and no network involved.
-      test: ["CMD-SHELL", "pg_isready -U fleet -d fleet"]
+      # Over TCP on loopback, inside the container, no password: the image's init phase runs a temporary
+      # server on the socket only, so a socket check would pass before the real server is up.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U fleet -d fleet"]
       interval: 5s
       timeout: 3s
       retries: 10
