@@ -89,3 +89,16 @@ def test_old_database_gains_the_timestamp_columns(db_url, open_store):
     s = open_store()
     assert s.get("x")["enqueued_at"] is None  # old rows: unknown, not "now"
     assert s.stats(NOW).oldest_available_enqueued_at is None  # MIN skips NULL
+
+
+def test_an_expired_job_out_of_attempts_is_not_waiting(open_store):
+    # The claim dead-letters it instead of leasing it, so it must not count as waiting (and so
+    # never as unclaimable) while the lease request that would dead-letter it hasn't come yet.
+    s = store(open_store, max_attempts=1)
+    s.add("a", "a" * 64, "m", "v1", data_class="open", now=NOW)
+    assert s.claim(NOW, TTL, **ANY) is not None  # attempts = 1 = max_attempts, no completion
+    stats = s.stats(NOW + TTL)
+    assert stats.counts == {("expired", "open"): 1}
+    assert stats.waiting == {}
+    # the same database seen with an attempt to spare: that job does wait
+    assert store(open_store, max_attempts=2).stats(NOW + TTL).waiting == {("m", "v1", "open"): 1}

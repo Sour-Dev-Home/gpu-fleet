@@ -7,7 +7,8 @@ from fastapi.testclient import TestClient
 from fleet_broker import telemetry
 from fleet_broker.addressing import result_key
 from fleet_broker.app import create_app
-from fleet_broker.store import JobStore
+from fleet_broker.claimability import Claimability
+from fleet_broker.store import JobStore, QueueStats
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import (
     InMemoryMetricReader,
@@ -61,6 +62,45 @@ def points(reader) -> dict[str, list]:
     return out
 
 
+class CountingStats:
+    """A stats() that counts its calls: each one is 3 queries in the real store."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        return NOW, QueueStats({}, None)
+
+
+def test_one_collection_reads_the_database_once_for_all_three_gauges():
+    stats, reader = CountingStats(), InMemoryMetricReader()
+    claimability = Claimability(lambda: NOW, {"open"})  # so the unclaimable gauge reads too
+    metrics = telemetry.OtelMetrics(MeterProvider(metric_readers=[reader]), stats, claimability)
+    names = set(points(reader))
+    assert {"fleet.jobs", "fleet.queue.oldest_age"} <= names
+    assert stats.calls == 1
+    del metrics
+
+
+def test_stats_are_reused_for_a_second_and_read_again_after_it():
+    stats, reader, ticks = CountingStats(), InMemoryMetricReader(), [100.0]
+    metrics = telemetry.OtelMetrics(
+        MeterProvider(metric_readers=[reader]),
+        stats,
+        Claimability(lambda: NOW, {"open"}),
+        cache_clock=lambda: ticks[0],
+    )
+    points(reader)
+    ticks[0] += 0.5
+    points(reader)  # within the second: the cached read
+    assert stats.calls == 1
+    ticks[0] += 0.6  # 1.1 s since the read
+    points(reader)
+    assert stats.calls == 2
+    del metrics
+
+
 def add(client, job_id):
     r = client.post(
         "/jobs", json={"job_id": job_id, **JOB}, headers={"Authorization": f"Bearer {ADMIN}"}
@@ -104,6 +144,20 @@ def test_queue_gauges_read_the_database(db_url):
     assert age.value == 20  # "b" has waited 20 s; the running "a" doesn't count
 
 
+def test_cancelled_jobs_are_counted_and_no_longer_wait(db_url):
+    client, clock, reader = rig(db_url)
+    add(client, "a")
+    r = client.post("/jobs/a/cancel", headers={"Authorization": f"Bearer {ADMIN}"})
+    assert r.status_code == 200
+    clock.now += 50
+    p = points(reader)
+    jobs = {(d.attributes["state"], d.attributes["data_class"]): d.value for d in p["fleet.jobs"]}
+    assert jobs[("cancelled", "open")] == 1
+    assert jobs[("queued", "open")] == 0
+    (age,) = p["fleet.queue.oldest_age"]
+    assert age.value == 0  # a cancelled job is not waiting
+
+
 def test_completion_counts_once_and_records_turnaround(db_url):
     client, clock, reader = rig(db_url)
     add(client, "a")
@@ -136,7 +190,7 @@ def test_gauge_labels_cover_every_state_and_data_class():
     from fleet_broker import app, store
 
     assert set(telemetry.DATA_CLASSES) == set(app.DATA_CLASSES)
-    for state in ("queued", "leased", "done", "dead"):  # the CHECK constraint's states
+    for state in ("queued", "leased", "done", "dead", "cancelled"):  # the CHECK constraint's states
         assert f"'{state}'" in store.SCHEMA and state in telemetry.JOB_STATES
 
 

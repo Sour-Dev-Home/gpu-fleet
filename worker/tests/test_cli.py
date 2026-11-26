@@ -142,3 +142,66 @@ def test_sigterm_wakes_an_idle_worker_immediately():
     started = time.monotonic()
     worker.run(should_stop=stopper.should_stop, sleep=stopper.sleep, backoff=long_wait)
     assert time.monotonic() - started < 2.0
+
+
+# --- the install ID is made only when telemetry is exported (ADR 0026) ---
+
+
+class _Ctx:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return None
+
+
+def run_main(monkeypatch, tmp_path, **extra):
+    """main() with the worker loop and telemetry stubbed; returns the instance ID telemetry got."""
+    from types import SimpleNamespace
+
+    from fleet_worker import cli
+
+    seen = []
+    runner = SimpleNamespace(prompt_versions={"echo-v1"}, models={"echo"})
+    fake = SimpleNamespace(runner=runner, run=lambda **kw: None)
+    monkeypatch.setattr(cli.jsonlog, "setup", lambda: None)
+    monkeypatch.setattr(cli.Stopper, "install", lambda self: None)
+    monkeypatch.setattr(cli, "build", lambda config, metrics: (fake, _Ctx()))
+
+    def metrics(env, instance_id):
+        seen.append(instance_id)
+        return object(), lambda: None
+
+    monkeypatch.setattr(cli.telemetry, "setup_metrics", metrics)
+    monkeypatch.setattr(cli.telemetry, "setup", lambda env, instance_id: lambda: None)
+    env = (
+        ENV
+        | {
+            "APPDATA": str(tmp_path / "appdata"),
+            "XDG_CONFIG_HOME": str(tmp_path / "xdg"),
+            "HOME": str(tmp_path / "home"),
+            "USERPROFILE": str(tmp_path / "home"),
+        }
+        | extra
+    )
+    assert cli.main(env) == 0
+    return seen[0]
+
+
+def test_without_a_telemetry_endpoint_nothing_is_written_to_disk(monkeypatch, tmp_path):
+    assert run_main(monkeypatch, tmp_path) is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_with_telemetry_disabled_nothing_is_written_to_disk(monkeypatch, tmp_path):
+    env = {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4318", "OTEL_SDK_DISABLED": "True"}
+    assert run_main(monkeypatch, tmp_path, **env) is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_with_a_telemetry_endpoint_the_install_id_is_made_and_kept(monkeypatch, tmp_path):
+    env = {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4318"}
+    first = run_main(monkeypatch, tmp_path, **env)
+    stored = list(tmp_path.rglob("worker-id"))
+    assert len(stored) == 1 and stored[0].read_text(encoding="utf-8").strip() == first
+    assert run_main(monkeypatch, tmp_path, **env) == first

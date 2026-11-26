@@ -162,6 +162,19 @@ class Runner(Protocol):
 
 Outcome = Literal["ran", "cached"]
 
+# The `outcome` label of fleet.worker.job.duration for a job that did not finish: one value per
+# kind of failure the loop already tells apart. Anything else is "error".
+_FAILURES = {
+    LeaseLost: "lease_lost",
+    InvalidResult: "invalid_result",
+    InvalidInput: "invalid_input",
+    InputMismatch: "invalid_input",
+    InputMissing: "invalid_input",
+    UploadRefused: "upload_refused",
+    ResultNotAccepted: "result_not_accepted",
+    TransientError: "transient",
+}
+
 
 class Worker:
     def __init__(
@@ -175,7 +188,9 @@ class Worker:
         url_store: Callable[[Lease], UrlResultStore] | None = None,
         sleep: Callable[[float], None] = time.sleep,
         rng: Callable[[], float] = random.random,
+        metrics: telemetry.Metrics | None = None,
     ) -> None:
+        self.metrics = metrics or telemetry.Metrics()
         if not isinstance(getattr(runner, "prompt_versions", None), frozenset):
             raise TypeError(f"runner {runner!r} must declare prompt_versions (a frozenset)")
         if not isinstance(getattr(runner, "models", None), frozenset):
@@ -272,6 +287,7 @@ class Worker:
         if self.lease is None:
             return None  # no trace for an empty poll: an idle fleet would bury the real ones
         job = self.lease.job
+        started, outcome = self.clock(), "error"  # error: anything not named below
         try:
             # One trace per attempt, backdated to when the lease was asked for (ADR 0018).
             with telemetry.span(
@@ -285,8 +301,16 @@ class Worker:
             ):
                 with telemetry.span("lease", start_time=asked):
                     pass  # ends now: the time the broker took to hand the job out
-                return self.process()
+                outcome = self.process()
+                return outcome
+        except BaseException as e:
+            outcome = _FAILURES.get(type(e), "error")
+            raise
         finally:
+            # Labels only, never the job ID (ADR 0018, 0026): one series per outcome, not per job.
+            self.metrics.job(
+                max(0.0, self.clock() - started), job.model, job.prompt_version, outcome
+            )
             self.lease = None
 
     def process(self) -> Outcome:

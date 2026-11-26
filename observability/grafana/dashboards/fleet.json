@@ -169,6 +169,24 @@
         "expr": "{service_name=~\"fleet-.+\"} | severity_text=~\"WARN.*|ERROR|CRITICAL\""
       }],
       "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" }
+    },
+    {
+      "id": 12, "type": "table", "title": "Unclaimable jobs (no worker has asked for them)",
+      "description": "Waiting jobs whose model and prompt version no lease request declared in the last 10 minutes, or whose data class is outside the broker's clearance. Empty is good. Rows come from the broker's own memory of recent lease requests: after a restart they can show for a minute until workers poll again.",
+      "gridPos": { "x": 0, "y": 29, "w": 12, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{
+        "refId": "A", "instant": true, "format": "table",
+        "expr": "max by (model, prompt_version) (fleet_jobs_unclaimable) > 0"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "sortBy": [{ "displayName": "Value", "desc": true }] }
     }
   ]
 }

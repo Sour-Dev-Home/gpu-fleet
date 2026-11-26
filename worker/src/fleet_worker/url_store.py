@@ -29,6 +29,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from . import telemetry
 from .loop import InputMismatch, InputMissing, TransientError, UploadRefused, retry_transient
 from .protocol import Lease, UploadTarget
 
@@ -80,7 +81,11 @@ class UrlStore:
         results_host: str,
         sleep: Callable[[float], None] = time.sleep,
         rng: Callable[[], float] = random.random,
+        metrics: telemetry.Metrics | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        self.metrics = metrics or telemetry.Metrics()
+        self._clock = clock
         self.broker = broker
         self.lease = lease
         self.http = http
@@ -90,6 +95,7 @@ class UrlStore:
     def _download_and_hash(self, url: str, what: str) -> str:
         check_url(url, self.results_host)
         digest = hashlib.sha256()
+        started = self._clock()
         try:
             with self.http.stream("GET", url) as r:
                 _unusable(r, what)
@@ -104,6 +110,7 @@ class UrlStore:
         except httpx.TransportError as e:
             # The type only: an httpx error can quote the URL, which is a credential.
             raise TransientError(f"{what}: {type(e).__name__}") from None
+        self.metrics.transfer(self._clock() - started, "download")  # successes only
         return digest.hexdigest()
 
     def fetch_inputs(self) -> None:
@@ -145,10 +152,13 @@ class UrlStore:
             # are content-addressed, so it is as good as ours, and /complete verifies it.
             log.info("result already stored", extra={"job_id": self.lease.job.job_id})
             return
+        started = self._clock()
         try:
             r = self.http.put(target.url, content=data, headers=target.headers)
         except httpx.TransportError as e:
             raise TransientError(f"result upload: {type(e).__name__}") from None
+        if r.is_success:
+            self.metrics.transfer(self._clock() - started, "upload")
         if r.status_code == 412:
             # If-None-Match: * and the object appeared since the broker looked. Ask again: it
             # adopts the stored object, or says it cannot (no checksum, over the cap).
