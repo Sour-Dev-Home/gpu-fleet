@@ -265,6 +265,17 @@ def _from_env() -> FastAPI | None:
         )
     db = Path(os.environ.get("FLEET_DB", "data/broker.db"))
     db.parent.mkdir(parents=True, exist_ok=True)
+    flush_logs = telemetry.export_logs()  # a no-op without the [otel] extra and an endpoint
+
+    def tracing(a: FastAPI) -> Callable[[], None]:
+        stop_traces = telemetry.trace_app(a, worker_token=worker_token)
+
+        def stop() -> None:  # on shutdown: the last spans, then the last log records
+            stop_traces()
+            flush_logs()
+
+        return stop
+
     return create_app(
         db,
         worker_token,
@@ -272,7 +283,7 @@ def _from_env() -> FastAPI | None:
         clearance,
         docs=os.environ.get("FLEET_DOCS") == "1",
         metrics=telemetry.setup(db, time.time),
-        tracing=lambda a: telemetry.trace_app(a, worker_token=worker_token),
+        tracing=tracing,
     )
 
 

@@ -4,6 +4,7 @@
 #   echo (default):     docker compose run --rm broker fleet-enqueue --demo 20   (echo-v1)
 #   FLEET_RUNNER=smoke: docker compose run --rm broker fleet-enqueue --demo 20 --prompt-version smoke-v1
 # More workers: docker compose up --scale worker=3
+# With Grafana, metrics, logs and traces (ADR 0018): add -f compose.yaml -f compose.obs.yaml (see that file).
 # No .env or secrets files: both would put tokens on disk.
 
 services:

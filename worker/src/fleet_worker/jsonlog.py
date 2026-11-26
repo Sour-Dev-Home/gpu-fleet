@@ -45,6 +45,49 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(entry, default=str)
 
 
+def otel_handler(service_name: str, base_url: str | None = None, exporter=None):
+    """A handler that also sends records over OTLP (the optional path, ADR 0018 Q38).
+
+    Needs the [otel] extra. `base_url` is an endpoint the caller already checked (https, or http
+    to loopback or a private network); `exporter` replaces OTLP in tests. Returns (handler, flush).
+    OTel's own handler would turn every extra and the source file's absolute path into attributes;
+    this one keeps the same ALLOWED_EXTRAS as the JSON lines, nothing else.
+    """
+    import uuid
+
+    # The SDK's own LoggingHandler is deprecated in favour of this one, which also leaves out code
+    # paths by default (log_code_attributes=False).
+    from opentelemetry.instrumentation.logging.handler import LoggingHandler
+    from opentelemetry.sdk._logs import LoggerProvider
+    from opentelemetry.sdk._logs.export import BatchLogRecordProcessor, SimpleLogRecordProcessor
+    from opentelemetry.sdk.resources import Resource
+
+    class Allowlisted(LoggingHandler):
+        # Returns (attributes, event name), as the parent's private hook does in 0.66b2.
+        @staticmethod
+        def _get_attributes(record: logging.LogRecord):
+            attributes = {k: record.__dict__[k] for k in ALLOWED_EXTRAS if k in record.__dict__}
+            if record.exc_info and record.exc_info[0] is not None:
+                # The type only, as on spans: a stack trace carries install paths.
+                attributes["exception.type"] = record.exc_info[0].__name__
+            return attributes, None
+
+    provider = LoggerProvider(
+        resource=Resource.create(
+            {"service.name": service_name, "service.instance.id": str(uuid.uuid4())}
+        )
+    )
+    if exporter is None:
+        from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+
+        provider.add_log_record_processor(
+            BatchLogRecordProcessor(OTLPLogExporter(endpoint=base_url + "/v1/logs"))
+        )
+    else:
+        provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
+    return Allowlisted(logger_provider=provider), provider.shutdown
+
+
 def setup(level: int = logging.INFO, stream=None) -> None:
     """Send every logger's records to stdout as JSON, replacing earlier handlers (uvicorn's too)."""
     handler = logging.StreamHandler(stream or sys.stdout)
@@ -56,3 +99,7 @@ def setup(level: int = logging.INFO, stream=None) -> None:
         logger = logging.getLogger(name)
         logger.handlers.clear()
         logger.propagate = True
+    # httpx logs every request's full URL at INFO: one line per idle poll, and a presigned URL's
+    # signature is a credential (phase 4). Warnings and errors still come through.
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)

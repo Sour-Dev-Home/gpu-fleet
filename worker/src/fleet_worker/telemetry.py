@@ -9,10 +9,13 @@ Span attributes carry IDs and labels only, never input, results, tokens or URLs.
 
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+
+from . import jsonlog
 
 try:
     from opentelemetry import propagate, trace
@@ -95,7 +98,18 @@ def setup(env: Mapping[str, str] = os.environ) -> Callable[[], None]:
         }
     )
     provider = TracerProvider(resource=resource)
+    endpoint = traces_endpoint(env)  # checked: https, or http to loopback / a private network
     # Batch: spans leave on a background thread, so a slow or missing collector never stalls a job.
-    provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=traces_endpoint(env))))
+    provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
     trace.set_tracer_provider(provider)
-    return provider.shutdown
+    # The same records as the JSON lines, also to the collector (Loki), allowlisted the same way.
+    handler, flush_logs = jsonlog.otel_handler(
+        resource.attributes["service.name"], endpoint.removesuffix("/v1/traces")
+    )
+    logging.getLogger().addHandler(handler)
+
+    def shutdown() -> None:
+        provider.shutdown()
+        flush_logs()
+
+    return shutdown

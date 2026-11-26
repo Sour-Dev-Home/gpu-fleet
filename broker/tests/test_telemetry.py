@@ -76,7 +76,10 @@ def test_queue_gauges_read_the_database(tmp_path):
     clock.now += 20
     p = points(reader)
     jobs = {(d.attributes["state"], d.attributes["data_class"]): d.value for d in p["fleet.jobs"]}
-    assert jobs == {("leased", "open"): 1, ("queued", "open"): 1}
+    nonzero = {k: v for k, v in jobs.items() if v}
+    assert nonzero == {("leased", "open"): 1, ("queued", "open"): 1}
+    # Zeros are reported too, so an emptied state reads 0 at once instead of going stale.
+    assert len(jobs) == len(telemetry.JOB_STATES) * len(telemetry.DATA_CLASSES)
     (age,) = p["fleet.queue.oldest_age"]
     assert age.value == 20  # "b" has waited 20 s; the running "a" doesn't count
 
@@ -94,6 +97,14 @@ def test_completion_counts_once_and_records_turnaround(tmp_path):
     assert dict(done.attributes) == {"model": "m", "prompt_version": "v1", "data_class": "open"}
     (turnaround,) = p["fleet.job.turnaround"]
     assert turnaround.count == 1 and turnaround.sum == 42
+
+
+def test_gauge_labels_cover_every_state_and_data_class():
+    from fleet_broker import app, store
+
+    assert set(telemetry.DATA_CLASSES) == set(app.DATA_CLASSES)
+    for state in ("queued", "leased", "done", "dead"):  # the CHECK constraint's states
+        assert f"'{state}'" in store.SCHEMA and state in telemetry.JOB_STATES
 
 
 def test_the_slo_threshold_is_a_bucket_edge():

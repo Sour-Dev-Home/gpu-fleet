@@ -43,3 +43,28 @@ def test_admin_token_goes_to_the_broker_only():
 def test_broker_is_published_on_loopback_only():
     ports = [line for line in service("broker") if line.startswith('- "') and ":8000" in line]
     assert ports == ['- "127.0.0.1:8000:8000"']
+
+
+OBS = COMPOSE.parent / "compose.obs.yaml"
+
+
+def obs_service(name: str) -> list[str]:
+    lines = OBS.read_text(encoding="utf-8").splitlines()
+    start = lines.index(f"  {name}:")
+    block = []
+    for line in lines[start + 1 :]:
+        if line.strip() and not line.startswith("   "):
+            break
+        block.append(line.split("#")[0].strip())
+    return block
+
+
+def test_grafana_requires_a_login():
+    # otel-lgtm enables anonymous Admin by default: any local process or browser page would be admin.
+    assert 'GF_AUTH_ANONYMOUS_ENABLED: "false"' in obs_service("lgtm")
+
+
+def test_observability_stack_publishes_only_grafana_on_loopback():
+    # OTLP (4317/4318), Prometheus, Tempo and Loki stay on the Compose network.
+    published = [line for line in obs_service("lgtm") if line.startswith('- "') and ":" in line]
+    assert published == ['- "127.0.0.1:3000:3000"']
