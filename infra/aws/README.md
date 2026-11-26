@@ -67,8 +67,13 @@ keys under `results/probe/` and deletes them, using your own login (from the rep
 
 ```powershell
 $env:AWS_REGION = "us-east-1"
+# `aws login` sessions need botocore[crt], which the broker doesn't ship: hand the session over as env vars instead
+aws configure export-credentials --profile fleet --format powershell | Invoke-Expression
 uv run --directory broker python ../scripts/probe-presign.py --bucket (terraform -chdir=infra/aws/fleet output -raw results_bucket)
+Remove-Item Env:AWS_ACCESS_KEY_ID, Env:AWS_SECRET_ACCESS_KEY, Env:AWS_SESSION_TOKEN, Env:AWS_CREDENTIAL_EXPIRATION -ErrorAction SilentlyContinue
 ```
+
+Last run (2026-11-26): ENFORCED on all three (403 longer body, 400 other SHA-256, 412 overwrite).
 
 Three lines say ENFORCED or NOT ENFORCED for: a longer body than signed, a body with another SHA-256, and a
 second PUT to the same key. Not enforced is safe (`/complete` HEADs the object), but tell the maintainer.

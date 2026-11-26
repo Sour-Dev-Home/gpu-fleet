@@ -28,9 +28,11 @@ on Google Cloud (ADR 0019/0021) and S3 is on AWS, so it needs AWS credentials wi
   same 422 `result_key_mismatch` to any other; it answers 413 `result_too_large` above `FLEET_MAX_RESULT_BYTES`
   (default 10 000 000, range-checked: a description is kilobytes, so more is a bug or an attack).
 - **The upload is pinned (Q76).** The PUT signs `ContentLength` and `ChecksumSHA256` (base64 of the digest bytes)
-  and `If-None-Match: *` (no overwrite); the returned `headers` are exactly the signed ones. **Whether S3 enforces
-  each on a presigned PUT is unverified**, so `scripts/probe-presign.py` (run by the maintainer with their own
-  login, against throwaway keys under `results/probe/`, not `results/open/`: it signs with the maintainer's own login, not the broker role, so the role's `open` scope does not apply) reports it. The system does not depend on the answer:
+  and `If-None-Match: *` (no overwrite); the returned `headers` are exactly the signed ones. **S3 enforces all
+  three on a presigned PUT (measured 2026-11-26 with `scripts/probe-presign.py`):** a longer body than signed is
+  refused (403), a body with another SHA-256 is refused (400), a second PUT to an existing key is refused (412).
+  The probe signs with the maintainer's own login against throwaway keys under `results/probe/` (the broker role's
+  `open` scope doesn't apply to it) and deletes them. The system does not depend on the answer either:
   the declared `sha256` and `size` are stored on the job row at `/upload-url` (nullable columns, expand-only
   migration, ADR 0012), and `/complete` first HEADs `results/<key>` (ChecksumMode ENABLED) and answers
   **422 `result_missing`** (no such object) or **422 `result_mismatch`** (over the cap, a different length, a
