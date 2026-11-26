@@ -26,7 +26,7 @@ def test_the_data_lock_denies_every_object_action_by_pattern():
     # a rarer object action cannot bypass the lock. The broker's Allow (GetObject, PutObject; HeadObject is
     # authorised by s3:GetObject) is all inside this pattern and the broker is exempted by ARN; ListBucket has
     # no "Object" in its name, so it is not denied.
-    s = statement("DenyDataAccessExceptAllowedRoles")
+    s = statement("DenyDataAccessExceptAllowedPrincipals")
     assert re.search(r'effect\s*=\s*"Deny"', s)
     actions = re.search(r"actions\s*=\s*\[(.*?)\]", s, re.DOTALL).group(1)
     assert re.findall(r'"([^"]+)"', actions) == ["s3:*Object*"]
@@ -39,7 +39,7 @@ def test_the_data_lock_denies_every_object_action_by_pattern():
 
 
 def test_the_data_lock_covers_inputs_and_results_for_every_principal():
-    s = statement("DenyDataAccessExceptAllowedRoles")
+    s = statement("DenyDataAccessExceptAllowedPrincipals")
     assert (
         '"${aws_s3_bucket.this.arn}/inputs/*"' in s and '"${aws_s3_bucket.this.arn}/results/*"' in s
     )
@@ -50,7 +50,7 @@ def test_the_data_lock_covers_inputs_and_results_for_every_principal():
 
 
 def test_the_exemption_is_by_principal_arn_with_arnnotlike():
-    s = statement("DenyDataAccessExceptAllowedRoles")
+    s = statement("DenyDataAccessExceptAllowedPrincipals")
     assert re.search(r'test\s*=\s*"ArnNotLike"\s*variable\s*=\s*"aws:PrincipalArn"', s)
     assert "values   = var.data_allowed_principal_arns" in s
     # a role ARN, not a session ARN: aws:PrincipalArn of an assumed-role session is the role's ARN

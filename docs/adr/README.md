@@ -35,4 +35,6 @@ updated to point to it.
 | [0027](0027-telemetry-destination.md) | Telemetry destination: Grafana Cloud Free over OTLP, one write-only token per source, a Scheduler-driven flush under request-based billing | Accepted (maintainer, 2026-11-26, Q88-Q92) |
 | [0028](0028-phase4-security-review.md) | Phase 4 security review: a flood alert trips the kill switch, a data-plane lock on the results bucket, small fixes | Accepted (Q93-Q95) |
 
+The decisions by theme, with the reasoning in short form, are in [docs/decisions.md](../decisions.md).
+
 Template: Status, Date, Context, Decision, Consequences, Alternatives considered. Keep each one to a page.

@@ -54,7 +54,7 @@ terraform apply tfplan
 terraform output broker_role_arn   # FLEET_AWS_ROLE_ARN: contains the account ID, so never commit it
 ```
 
-**Object lock (Q94).** The results bucket's policy denies `s3:GetObject`, `PutObject` and `DeleteObject` on `inputs/*`
+**Object lock (Q94).** The results bucket's policy denies `s3:*Object*` (Get, Put, Delete and their version, ACL and tagging variants) on `inputs/*`
 and `results/*` to every principal except the broker role and your admin principal, so a leaked or over-broad identity in
 the account cannot reach the data. Set the admin principal first (in the vault, never committed). Get the value
 you sign in as, store it (prompted, never on the command line), and pass it through `scripts/with-secrets.ps1`
@@ -85,11 +85,9 @@ Before relying on the signed constraints, measure what S3 enforces on a presigne
 keys under `results/probe/` and deletes them, using your own login (from the repository root):
 
 ```powershell
-$env:AWS_REGION = "us-east-1"
-# `aws login` sessions need botocore[crt], which the broker doesn't ship: hand the session over as env vars instead
-aws configure export-credentials --profile fleet --format powershell | Invoke-Expression
-uv run --directory broker python ../scripts/probe-presign.py --bucket (terraform -chdir=infra/aws/fleet output -raw results_bucket)
-Remove-Item Env:AWS_ACCESS_KEY_ID, Env:AWS_SECRET_ACCESS_KEY, Env:AWS_SESSION_TOKEN, Env:AWS_CREDENTIAL_EXPIRATION -ErrorAction SilentlyContinue
+$env:AWS_PROFILE = "fleet"; $env:AWS_REGION = "us-east-1"
+# `--with "botocore[crt]"`: the `aws login` credential provider needs the AWS CRT, which the broker doesn't ship (pinned to broker/uv.lock's botocore, so the overlay can't shadow it)
+uv run --with "botocore[crt]==1.44.12" --directory broker python ../scripts/probe-presign.py --bucket (terraform -chdir=infra/aws/fleet output -raw results_bucket)
 ```
 
 Last run (2026-11-26): ENFORCED on all three (403 longer body, 400 other SHA-256, 412 overwrite).

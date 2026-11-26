@@ -132,7 +132,7 @@ data "aws_iam_policy_document" "tls_only" {
   dynamic "statement" {
     for_each = length(var.data_allowed_principal_arns) > 0 ? [1] : []
     content {
-      sid     = "DenyDataAccessExceptAllowedRoles"
+      sid     = "DenyDataAccessExceptAllowedPrincipals"
       effect  = "Deny"
       actions = ["s3:*Object*"]
       resources = [
