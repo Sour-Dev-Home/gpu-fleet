@@ -47,7 +47,9 @@ This makes everything except the Cloud Run service (`broker_image` is null).
 ## 4. The two broker tokens (new ones for the cloud)
 
 Generate NEW tokens (not the local ones; docs/secrets.md) straight into the vault under cloud names, then add them as
-secret versions. Python reads the variable itself and writes it with no newline, so the token appears on no command line:
+secret versions. Python reads the variable itself and writes it with no newline, so the token appears on no command line.
+This needs PowerShell 7.4+ (check `$PSVersionTable.PSVersion`): its native-command pipes pass raw bytes, while older
+versions append a newline.
 
 ```powershell
 foreach ($n in 'FLEET_CLOUD_WORKER_TOKEN','FLEET_CLOUD_ADMIN_TOKEN') {
@@ -74,7 +76,14 @@ Set-Secret -Vault fleet -Name FLEET_CLOUDSQL_POSTGRES_PASSWORD -Secret ([Convert
 gcloud sql users set-password postgres --instance=fleet --prompt-for-password
 ```
 
-At the prompt, paste the value from the vault (`Get-Secret -Vault fleet FLEET_CLOUDSQL_POSTGRES_PASSWORD -AsPlainText`).
+Before the prompt, put the value on the clipboard without printing it, paste at the prompt, then clear the clipboard:
+
+```powershell
+Get-Secret -Vault fleet FLEET_CLOUDSQL_POSTGRES_PASSWORD -AsPlainText | Set-Clipboard
+# paste at the gcloud prompt, then:
+Set-Clipboard -Value $null
+```
+
 Don't use `--password=`: gcloud records its command line in its logs.
 
 ## 6. One-time bootstrap: let the IAM user own the database (UNTESTED)
@@ -90,7 +99,12 @@ As `postgres`, through the proxy under your own login (you need `roles/cloudsql.
 $conn = tf output -raw instance_connection_name
 $u    = tf output -raw iam_database_user
 cloud-sql-proxy $conn --port 5433          # leave running; use a second terminal for psql
-psql -h 127.0.0.1 -p 5433 -U postgres -d fleet      # asks for the password (vault, as in step 5)
+```
+
+In a second terminal, psql gets the password as PGPASSWORD from the vault, so nothing is pasted or printed:
+
+```powershell
+../../../scripts/with-secrets.ps1 -Names FLEET_CLOUDSQL_POSTGRES_PASSWORD -- pwsh -NoProfile -Command '$env:PGPASSWORD = $env:FLEET_CLOUDSQL_POSTGRES_PASSWORD; psql -h 127.0.0.1 -p 5433 -U postgres -d fleet'
 ```
 
 ```sql
@@ -117,6 +131,9 @@ docker push "$repo/broker:$sha"
 docker buildx imagetools inspect "$repo/broker:$sha" | Select-String Digest     # sha256:...
 ```
 
+Old tagged images are never deleted automatically. When the registry nears 0.5 GB, delete old ones by hand
+(`gcloud artifacts docker images delete`), never the deployed digest.
+
 ## 8. Second apply, by digest
 
 ```powershell
@@ -135,7 +152,9 @@ this PC has curl 8.19.0 as `curl.exe`, so they work; check yours with `curl.exe 
 $url = tf output -raw service_url
 curl.exe -i "$url/healthz"                                   # 204 (the first call is a cold start: a few seconds)
 $env:URL = $url
-../../../scripts/with-secrets.ps1 -Names FLEET_CLOUD_WORKER_TOKEN -- pwsh -NoProfile -Command 'curl.exe -i -X POST --variable %FLEET_CLOUD_WORKER_TOKEN --expand-header "Authorization: Bearer {{FLEET_CLOUD_WORKER_TOKEN}}" -H "Content-Type: application/json" -d "{\"capabilities\":[\"smoke\"],\"models\":[\"smoke\"]}" "$env:URL/lease"'
+Set-Content body.json '{"capabilities":["smoke"],"models":["smoke"]}'     # no secret in it
+../../../scripts/with-secrets.ps1 -Names FLEET_CLOUD_WORKER_TOKEN -- pwsh -NoProfile -Command 'curl.exe -i -X POST --variable %FLEET_CLOUD_WORKER_TOKEN --expand-header "Authorization: Bearer {{FLEET_CLOUD_WORKER_TOKEN}}" -H "Content-Type: application/json" -d "@body.json" "$env:URL/lease"'
+Remove-Item body.json
 ```
 
 With an empty queue (or nothing matching) the answer is `204`. A `401` means the secret version has a stray newline
@@ -145,13 +164,15 @@ With an empty queue (or nothing matching) the answer is `204`. A `401` means the
 
 Steps follow docs/secrets.md; the Cloud Run parts:
 
-1. Add the current values as versions of `fleet-worker-token-previous` and `fleet-admin-token-previous`. Those secrets
-   exist only while `rotation_in_progress` is true, so set `TF_VAR_rotation_in_progress=true` and apply first (the
-   revision then needs a version in each; do the apply and the `gcloud secrets versions add` before the redeploy).
+The `-previous` secrets always exist, empty. A revision that references one with no version can't start, so versions
+come first, then the flag.
+1. Copy the current values into versions of `fleet-worker-token-previous` and `fleet-admin-token-previous` (the step 4
+   commands, reading the current token from the vault, e.g. a `..._PREVIOUS` vault entry as in docs/secrets.md).
 2. Add the NEW tokens as new versions of `fleet-worker-token` and `fleet-admin-token` (step 4 commands).
-3. Redeploy so a new revision reads `latest` (`gcloud run services update fleet-broker --region us-central1`).
+3. Apply with `TF_VAR_rotation_in_progress=true`: a new revision passes the previous tokens too and reads `latest`.
    Both old and new tokens now work. Switch the workers.
-4. Set `rotation_in_progress` back to false and apply: the previous secrets, their access and the env refs go away.
+4. Set `rotation_in_progress` back to false and apply (the env refs go). Then disable and destroy superseded versions
+   (`gcloud secrets versions disable N --secret=...`, then `gcloud secrets versions destroy N --secret=...`): the free tier is 6 active versions.
 
 ## 10. Teardown
 

@@ -122,12 +122,10 @@ resource "google_cloud_run_v2_service" "broker" {
 
       resources {
         limits = {
-          # Napkin math: the instance is billed only while a request is handled (about 43k active seconds a
-          # month: 0.43M requests x 0.1 s) at 1.25 vCPU (broker 1 + proxy 0.25) = about 54k vCPU-s of the 180k free.
-          # UNVERIFIED: that Cloud Run accepts a total of 1.25 CPU with concurrency 40 (a service with less than
-          # 1 CPU is limited to concurrency 1, and the rule's reach over sidecars is unclear). If apply refuses,
-          # set this back to "1".
-          cpu    = "0.25"
+          # Cloud Run accepts whole CPUs above 1, so a total of 1.25 would likely be refused: both containers get 1.
+          # Napkin math: billed only while a request is handled (about 43k active seconds a month: 0.43M requests
+          # x 0.1 s) at 2 vCPU = about 86k vCPU-s of the 180k free. 0.75 broker + 0.25 proxy is untried.
+          cpu    = "1"
           memory = "256Mi"
         }
         cpu_idle = true

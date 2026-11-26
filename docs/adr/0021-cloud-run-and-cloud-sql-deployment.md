@@ -32,8 +32,9 @@ docs/research/phase-4.md.
   `repo@sha256:...`. The variable refuses a tag. The service is created only when `broker_image` is set, so the
   first apply makes the registry the image goes into. CI deploys wait for the AWS federation work.
 - **Cloud Run numbers (Q61).** Min 0, max 1 instance now and 3 once volunteers join (Q65; the compute and
-  throughput ceiling, ADR 0019), 1 CPU and 512 MiB for the broker plus 0.25 CPU and 256 MiB for the proxy (about
-  54k of the 180k free vCPU-s a month; Cloud Run accepting 1.25 CPU in total with concurrency 40 is UNVERIFIED),
+  throughput ceiling, ADR 0019), 1 CPU and 512 MiB for the broker plus 1 CPU and 256 MiB for the proxy (Cloud Run
+  accepts only whole CPUs above 1, so 1 + 0.25 was likely to be refused; 2 vCPU x about 43k active seconds is
+  about 86k of the 180k free vCPU-s a month; 0.75 + 0.25 is untried),
   request-based billing, timeout 30 s, generation 1 (faster cold starts; nothing
   here needs generation 2). Concurrency 40: Little's law with 3 ms of SQL per request gives 40 x 0.003 = 0.12
   connections busy per instance, so the pool of 4 (ADR 0020) is ample even if every request hits the database;
@@ -45,7 +46,9 @@ docs/research/phase-4.md.
   point-in-time recovery on (UNVERIFIED that `db-f1-micro` allows it; if apply refuses, backups only).
 - **Request log excluded (Q64).** A project log exclusion drops Cloud Run's request log for this service. It
   records every caller's IP and user agent, and ADR 0018 promised that volunteers' and strangers' IPs are not
-  stored. The broker's own logs stay. Database security logs (connections, disconnections, lock waits,
+  stored. Only requests below status 500 are dropped: Cloud Run's own failures (no instance, timeouts) are
+  kept, since the broker never sees them. A 4xx alert therefore has no request log behind it, by design: the
+  broker's own logs say what happened. Database security logs (connections, disconnections, lock waits,
   checkpoints, temp files) are on: a few MB a month against 50 GiB free.
 - **Denial of wallet (Q65).** The instance cap bounds compute and throughput, **not per-request fees**: an
   unauthenticated flood still costs per request. So: max instances 1 now (3 when volunteers join); a Cloud
@@ -61,7 +64,8 @@ docs/research/phase-4.md.
 ## Consequences
 - Cost: Cloud SQL about $9/month (db-f1-micro $7.30 + 10 GB $1.70; console, 2026-11-25), Cloud Run inside the free
   tier at this traffic (about 0.43M requests/month when idle, against 2M free), Artifact Registry and Secret
-  Manager free. The public IPv4 address charge is UNVERIFIED: check the bill.
+  Manager free. The public IPv4 address charge is UNVERIFIED: check the bill. Cloud Monitoring alerting policies
+  are reportedly no longer free (about $1.50/month per condition; one here): UNVERIFIED, check the first bill.
 - The Auth Proxy is a second process in every instance: more memory (256 MiB) and one more image to bump by hand
   (Dependabot does not read `.tf`).
 - The first deploy needs the manual steps in `infra/gcp/fleet/README.md`; the GRANT is UNTESTED until run.

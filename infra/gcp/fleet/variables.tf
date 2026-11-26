@@ -73,8 +73,8 @@ variable "alert_email" {
 
 variable "rotation_in_progress" {
   description = <<-EOT
-    True only while rotating the broker's tokens: creates the two "-previous" secrets and passes them to the
-    broker as FLEET_*_TOKEN_PREVIOUS. Add a version to each first (README), or the revision can't start.
+    True only while rotating the broker's tokens: passes the two "-previous" secrets (which always exist, empty)
+    to the broker as FLEET_*_TOKEN_PREVIOUS. Add a version to each first (README), or the revision can't start.
   EOT
   type        = bool
   default     = false

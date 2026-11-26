@@ -104,12 +104,15 @@ resource "google_project_iam_member" "sql_instance_user" {
 }
 
 # Containers only: the maintainer adds the values with gcloud (Q59), so no secret ever enters Terraform state.
-# The two "-previous" secrets exist only during a token rotation (var.rotation_in_progress; README).
+# The two "-previous" secrets always exist (an empty secret costs nothing) so a rotation can add their versions
+# BEFORE the broker is pointed at them; only the broker's env refs wait for var.rotation_in_progress (README).
 locals {
-  secret_ids = toset(concat(
-    ["fleet-worker-token", "fleet-admin-token"],
-    var.rotation_in_progress ? ["fleet-worker-token-previous", "fleet-admin-token-previous"] : [],
-  ))
+  secret_ids = toset([
+    "fleet-worker-token",
+    "fleet-admin-token",
+    "fleet-worker-token-previous",
+    "fleet-admin-token-previous",
+  ])
 }
 
 resource "google_secret_manager_secret" "token" {

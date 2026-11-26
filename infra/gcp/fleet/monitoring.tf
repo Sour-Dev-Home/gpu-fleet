@@ -1,6 +1,8 @@
 # Q65: a flood of unauthenticated requests costs per request even though the instance cap bounds compute. A
 # burst of 4xx (wrong or missing tokens, scans, rate-limit 429s) is the sign, so it sends an email. The budget
 # kill switch that would act on it is a separate PR after the first deploy.
+# Cost UNVERIFIED: alerting policies are reportedly no longer free (about $1.50/month per condition). Check the
+# first bill; one condition here.
 resource "google_monitoring_notification_channel" "email" {
   display_name = "fleet alerts (email)"
   type         = "email"

@@ -113,7 +113,9 @@ def test_registry_tags_are_immutable():
 def test_proxy_sidecar_is_small_and_shuts_down_cleanly():
     run = block("cloudrun.tf", 'resource "google_cloud_run_v2_service" "broker"')
     proxy = run[run.index('name = "cloud-sql-proxy"') :]
-    assert re.search(r'cpu\s*=\s*"0\.25"', proxy)
+    # Cloud Run takes whole CPUs above 1, so 1 + 0.25 would likely be refused: every container has cpu "1".
+    assert re.search(r'cpu\s*=\s*"1"', proxy)
+    assert not re.search(r'cpu\s*=\s*"0\.\d+"', run)
     assert '"--max-sigterm-delay=10s"' in proxy
     assert '"--structured-logs"' in proxy
     assert '"--auto-iam-authn"' in proxy
@@ -142,8 +144,10 @@ def test_request_log_is_excluded_so_client_ips_are_not_stored():
     assert (
         'resource.type=\\"cloud_run_revision\\"' in b or 'resource.type="cloud_run_revision"' in b
     )
-    assert "run.googleapis.com%2Frequests" in b
-    assert 'resource.labels.service_name="fleet-broker"' in b.replace('\\"', '"')
+    plain = b.replace('\\"', '"')
+    assert 'log_id("run.googleapis.com/requests")' in plain
+    assert 'resource.labels.service_name="fleet-broker"' in plain
+    assert "httpRequest.status < 500" in plain  # Cloud Run's own 5xx entries are kept
     assert "google_logging_project_exclusion" in text
 
 
@@ -166,7 +170,8 @@ def test_token_rotation_secrets_are_optional_and_per_secret():
     assert re.search(r"default\s*=\s*false", var) and "bool" in var
     main = code("main.tf")
     assert '"fleet-worker-token-previous"' in main and '"fleet-admin-token-previous"' in main
-    assert "var.rotation_in_progress" in main
+    # the secrets always exist (empty); only the broker's env refs wait for the flag, so versions can come first
+    assert "var.rotation_in_progress" not in main
     run = block("cloudrun.tf", 'resource "google_cloud_run_v2_service" "broker"')
     assert "FLEET_WORKER_TOKEN_PREVIOUS" in run and "FLEET_ADMIN_TOKEN_PREVIOUS" in run
     assert "var.rotation_in_progress" in run
@@ -183,6 +188,19 @@ def test_readme_runbook_keeps_secrets_off_command_lines():
     assert "--port 5433" in text and "-p 5433" in text
     assert "set-quota-project" in text
     assert "--expand-header" in text
+    assert "PowerShell 7.4+" in text
+    assert '-d "@body.json"' in text and '\\"' not in fenced
+    assert "PGPASSWORD" in text and "Set-Clipboard -Value $null" in text
+    for line in text.splitlines():  # a plaintext secret is never printed to the console
+        if "-AsPlainText" in line:
+            assert "| Set-Clipboard" in line, line
+    assert "secrets versions disable" in text and "secrets versions destroy" in text
+
+
+def test_alert_cost_is_recorded_as_unverified():
+    assert "$1.50" in (STACK / "monitoring.tf").read_text(encoding="utf-8")
+    adr = (ROOT / "docs/adr/0021-cloud-run-and-cloud-sql-deployment.md").read_text(encoding="utf-8")
+    assert "$1.50/month per condition" in adr
 
 
 def test_service_account_has_only_the_three_roles():
