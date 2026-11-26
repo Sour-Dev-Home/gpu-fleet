@@ -8,8 +8,8 @@ from dataclasses import replace
 import httpx
 
 from . import telemetry
-from .loop import LeaseLost, ResultRejected, TransientError
-from .protocol import Job, Lease
+from .loop import InvalidResult, LeaseLost, ResultNotAccepted, ResultRejected, TransientError
+from .protocol import Job, Lease, UploadTarget
 
 
 def _is_loopback_ip(host: str) -> bool:
@@ -91,7 +91,15 @@ class HttpBroker:
             body["prompt_version"],
             body.get("context_sha256"),  # .get: brokers from before ADR 0012 omit it
         )
-        return Lease(job, body["lease_token"], body["ttl_seconds"], received_at=sent_at)
+        return Lease(
+            job,
+            body["lease_token"],
+            body["ttl_seconds"],
+            received_at=sent_at,
+            # present only when the broker has an S3 bucket (ADR 0025)
+            input_url=body.get("input_url"),
+            context_url=body.get("context_url"),
+        )
 
     def heartbeat(self, lease: Lease) -> Lease:
         sent_at = self.clock()
@@ -104,6 +112,32 @@ class HttpBroker:
         r.raise_for_status()
         # A copy, since Lease is frozen, stamped with the time the request was SENT.
         return replace(lease, ttl_seconds=r.json()["ttl_seconds"], received_at=sent_at)
+
+    def upload_url(self, lease: Lease, result_key: str, sha256: str, size: int) -> UploadTarget:
+        """Ask for a presigned PUT for this job's result: `sha256` (hex) and `size` of the bytes
+        are signed into it, so S3 accepts only exactly those bytes (ADR 0025)."""
+        r = self._post(
+            "/upload-url",
+            json={
+                "job_id": lease.job.job_id,
+                "lease_token": lease.lease_token,
+                "result_key": result_key,
+                "sha256": sha256,
+                "size": size,
+            },
+        )
+        if r.status_code == 409:
+            raise LeaseLost(lease.job.job_id)
+        code = _error_code(r)
+        if r.status_code == 422 and code == "result_key_mismatch":
+            raise ResultRejected(lease.job.job_id)
+        if r.status_code == 413:
+            raise InvalidResult(f"{lease.job.job_id}: result too large for the broker's cap")
+        # 404 (code presigned_urls_disabled): this broker has no bucket but sent URLs, or the
+        # worker is pointed at the wrong broker. Nothing a retry fixes: stop loudly.
+        r.raise_for_status()
+        body = r.json()
+        return UploadTarget(body["url"], dict(body["headers"]))
 
     def complete(self, lease: Lease, result_key: str) -> None:
         r = self._post(
@@ -122,4 +156,7 @@ class HttpBroker:
             # The broker recomputed the content address and it differs (ADR 0023). Only this code:
             # FastAPI answers 422 for a malformed body too, and that stays an HTTP error.
             raise ResultRejected(lease.job.job_id)
+        if r.status_code == 422 and _error_code(r) in {"result_missing", "result_mismatch"}:
+            # The broker looked at the stored object and refused it (ADR 0025).
+            raise ResultNotAccepted(lease.job.job_id, _error_code(r))
         r.raise_for_status()

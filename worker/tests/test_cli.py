@@ -80,6 +80,20 @@ def test_the_worker_declares_its_runners_capabilities_to_the_broker(tmp_path):
     assert worker.broker.models == ["echo"]
 
 
+def test_the_url_store_uses_a_client_that_never_carries_the_worker_token(tmp_path):
+    # Presigned URLs point at S3: the broker's bearer token must not go along (ADR 0025).
+    from fleet_worker.protocol import Lease
+
+    worker, client = build(Config(ENV | {"FLEET_RESULTS_DIR": str(tmp_path)}))
+    client.close()
+    store = worker.url_store(
+        Lease(Job("j", "a" * 64, "echo", "echo-v1"), "t", 60.0, 0.0, "https://s3/x")
+    )
+    assert "authorization" not in store.http.headers
+    assert store.http is not client.clients[0]  # the broker's client is the one with the token
+    assert "authorization" in client.clients[0].headers
+
+
 def test_echo_runner_is_deterministic():
     job = Job("j", "a" * 64, "m", "v1")
     assert echo(job, lambda: None) == echo(job, lambda: None)

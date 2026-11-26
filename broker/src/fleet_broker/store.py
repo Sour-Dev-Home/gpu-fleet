@@ -58,7 +58,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     context_sha256   TEXT,                        -- NULL: no context (ADR 0012)
     data_class       TEXT,                        -- NULL: treated as footage (ADR 0015)
     enqueued_at      DOUBLE PRECISION,            -- broker wall clock; NULL for rows before ADR 0018
-    done_at          DOUBLE PRECISION             -- set by the first accepted completion
+    done_at          DOUBLE PRECISION,            -- set by the first accepted completion
+    result_sha256    TEXT,                        -- hex SHA-256 the worker declared at /upload-url (ADR 0025)
+    result_size      BIGINT                       -- and the length it declared
 );
 """
 
@@ -72,6 +74,8 @@ MIGRATIONS = [
     ("data_class", "TEXT"),
     ("enqueued_at", "DOUBLE PRECISION"),  # ADR 0018: queue age and the enqueue-to-done SLO
     ("done_at", "DOUBLE PRECISION"),
+    ("result_sha256", "TEXT"),  # ADR 0025: what /upload-url signed, checked again at /complete
+    ("result_size", "BIGINT"),
 ]
 
 # Serves the claim: the oldest available job, in FIFO order, without sorting. Done and dead
@@ -334,6 +338,45 @@ class JobStore:
                 (now + ttl_seconds, job_id, _digest(lease_token)),
             ).fetchone()
         return None if row is None else row["lease_expires_at"]
+
+    def declare_result(
+        self, job_id: str, lease_token: str, result_key: str, sha256: str, size: int
+    ) -> str | None:
+        """Record what the lease holder is about to upload, and return the job's result key
+        (recomputed from its own row, never the caller's), or None if the caller does not hold
+        the lease. Raises ResultKeyMismatch if `result_key` is not that key (ADR 0023).
+
+        /complete later compares the stored object with this declaration (ADR 0025). A second
+        call replaces the first."""
+        token = _digest(lease_token)
+        with self.pool.connection() as conn:
+            job = conn.execute(
+                "SELECT input_sha256, model, prompt_version, context_sha256 FROM jobs"
+                " WHERE job_id = %s AND lease_token = %s AND state = 'leased'",
+                (job_id, token),
+            ).fetchone()
+            if job is None:
+                return None
+            key = result_key_for(job)
+            if key != result_key:
+                raise ResultKeyMismatch(job_id)
+            row = conn.execute(
+                "UPDATE jobs SET result_sha256 = %s, result_size = %s"
+                " WHERE job_id = %s AND lease_token = %s AND state = 'leased' RETURNING job_id",
+                (sha256, size, job_id, token),
+            ).fetchone()
+        return None if row is None else key
+
+    def upload_facts(self, job_id: str, lease_token: str) -> dict[str, Any] | None:
+        """For the holder of the lease on a leased or done job: the declared upload and the
+        fields of its result key. None for anyone else, so nothing is revealed about the job."""
+        with self.pool.connection() as conn:
+            return conn.execute(
+                "SELECT state, input_sha256, model, prompt_version, context_sha256,"
+                " result_sha256, result_size FROM jobs"
+                " WHERE job_id = %s AND lease_token = %s AND state IN ('leased', 'done')",
+                (job_id, _digest(lease_token)),
+            ).fetchone()
 
     def complete(
         self, job_id: str, lease_token: str, result_key: str, now: float | None = None

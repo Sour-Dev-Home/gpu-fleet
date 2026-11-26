@@ -62,8 +62,14 @@ Out of scope everywhere: an attacker on the maintainer's own PC (they would alre
   content-addressed, so the worst case is churn, not loss. Per-worker tokens and buckets fix it (below).
 - [x] The broker no longer trusts the `result_key` a worker reports: it recomputes the content address
       from the job's own fields and answers 422 to a mismatch, so a worker can't complete job A with job
-      B's result (ADR 0023, Q66). Still open: it does not check that the result exists in storage or is
-      valid (quarantine, below).
+      B's result (ADR 0023, Q66). Still open: it does not check that the result is valid (quarantine, below).
+- [x] Workers hold no cloud keys and the broker stores none: presigned URLs per object (5 and 10 minutes, only
+      for the lease holder's own keys), AWS credentials by web identity federation with a role that trusts
+      only the broker's service account and audience, and may only read `inputs/*`/`results/*` and write
+      `results/*` (ADR 0025, Q74-Q78). `/complete` HEADs the stored object and refuses one that is missing,
+      over the size cap, or whose SHA-256 differs from what `/upload-url` signed, so a result is recorded
+      only if it exists in storage. Not yet applied; S3 enforcement of the signed length, checksum and
+      no-overwrite is measured by `scripts/probe-presign.py`.
 - [ ] Run the security-reviewer again on the deployment (Terraform, IAM, Cloud Run settings).
 
 **Before phase 10 (volunteers):**

@@ -21,6 +21,7 @@ import signal
 import sys
 import threading
 from collections.abc import Callable, Mapping
+from typing import Self
 
 import httpx
 
@@ -30,6 +31,7 @@ from .http_broker import HttpBroker
 from .loop import Runner, Worker
 from .protocol import Job
 from .smoke import check_model_server, make_smoke
+from .url_store import UrlStore
 
 log = logging.getLogger("fleet_worker")
 
@@ -115,7 +117,24 @@ class Stopper:
         self.event.wait(seconds)
 
 
-def build(config: Config) -> tuple[Worker, httpx.Client]:
+class _Clients:
+    """Closes the broker client and the transfer client together (`with` or close())."""
+
+    def __init__(self, *clients: httpx.Client) -> None:
+        self.clients = clients
+
+    def close(self) -> None:
+        for c in self.clients:
+            c.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+
+def build(config: Config) -> tuple[Worker, _Clients]:
     client = httpx.Client(
         base_url=config.broker_url,
         headers={"Authorization": f"Bearer {config.token}"},
@@ -123,7 +142,17 @@ def build(config: Config) -> tuple[Worker, httpx.Client]:
     )
     runner = RUNNERS[config.runner_name](config)
     broker = HttpBroker(client, runner.prompt_versions, runner.models, allow_http=config.allow_http)
-    return Worker(broker, DirStore(config.results_dir), runner), client
+    # For S3 transfers by presigned URL (ADR 0025), used only for leases that carry URLs. Its own
+    # client: no base URL and, above all, no Authorization header, because the URLs point at S3.
+    # Generation can be slow but a transfer is not: a long read timeout covers a big input.
+    transfers = httpx.Client(timeout=httpx.Timeout(10.0, read=300.0))
+    worker = Worker(
+        broker,
+        DirStore(config.results_dir),
+        runner,
+        url_store=lambda lease: UrlStore(broker, lease, transfers, allow_http=config.allow_http),
+    )
+    return worker, _Clients(client, transfers)
 
 
 def main(env: Mapping[str, str] = os.environ) -> int:
