@@ -48,6 +48,7 @@ KNOWN_COMPONENTS = {
     "otelcol.processor.transform",
     "otelcol.auth.basic",
     "otelcol.exporter.otlphttp",
+    "local.file",
 }
 
 
@@ -87,13 +88,16 @@ def test_the_token_comes_from_a_secret_file_and_nothing_secret_is_literal():
     m = re.search(r'otelcol\.auth\.basic\s+"\w+"\s*\{(.*?)\n\}', cfg, re.DOTALL)
     assert m
     block = m.group(1)
-    # the top-level username/password are deprecated: both live in a client_auth block, the token as a file
-    assert re.search(r"client_auth\s*\{", block)
-    top = re.sub(r"client_auth\s*\{.*?\}", "", block, flags=re.DOTALL)
-    assert not re.search(r"\b(username|password)\s*=", top), "deprecated top-level credentials"
-    assert re.search(r'password_file\s*=\s*sys\.env\("FLEET_GRAFANA_TOKEN_FILE"\)', block)
-    assert not re.search(r"\bpassword\s*=", block)
-    assert "local.file" not in cfg
+    # The docs' client_auth block fails to build in Alloy 1.22 ("no credential source provided", measured
+    # 2026-11-26 with username+password_file, username_file+password_file and username+password), so the
+    # top-level form is used, with the token read from the protected file by a secret local.file.
+    assert not re.search(r"client_auth\s*\{", block), "client_auth does not build in Alloy 1.22"
+    assert re.search(r'username\s*=\s*sys\.env\("FLEET_GRAFANA_INSTANCE_ID"\)', block)
+    assert re.search(r"password\s*=\s*local\.file\.(\w+)\.content", block)
+    lf = re.search(r'local\.file\s+"\w+"\s*\{(.*?)\n\}', cfg, re.DOTALL)
+    assert lf
+    assert re.search(r'filename\s*=\s*sys\.env\("FLEET_GRAFANA_TOKEN_FILE"\)', lf.group(1))
+    assert re.search(r"is_secret\s*=\s*true", lf.group(1))
     # no password, token or key written in the file
     assert not re.search(r'(?i)(password|token|secret|api_key)\s*=\s*"', cfg)
     assert not re.search(r"glc_|glsa_|Bearer |Basic ", cfg)
