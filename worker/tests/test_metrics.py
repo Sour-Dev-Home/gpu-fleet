@@ -226,7 +226,11 @@ ENV = {"FLEET_BROKER_URL": "http://127.0.0.1:8000", "FLEET_WORKER_TOKEN": "t" * 
 
 
 def test_traces_and_metrics_share_the_install_id(started, tmp_path):
-    env = {**ENV, "FLEET_WORKER_ID": "install-9"}
+    env = {
+        **ENV,
+        "FLEET_WORKER_ID": "install-9",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4318",
+    }
     assert cli.main(env) == 0
     assert started == {"traces": "install-9", "metrics": "install-9"}
 

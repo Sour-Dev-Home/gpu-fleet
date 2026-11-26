@@ -177,10 +177,17 @@ def build(config: Config, metrics: telemetry.Metrics | None = None) -> tuple[Wor
 def main(env: Mapping[str, str] = os.environ) -> int:
     jsonlog.setup()  # one JSON object per line on stdout (ADR 0018)
     config = Config(env)
-    try:
-        instance_id = identity.install_id(env)  # one ID per install, for traces and metrics
-    except ValueError as e:
-        raise SystemExit(f"fleet-worker: {e}") from None
+    # One ID per install, for traces and metrics: so only a worker that exports them makes one.
+    # Otherwise nothing is read or written (a notebook, a test, a worker with nowhere to send it).
+    exporting = bool(env.get("OTEL_EXPORTER_OTLP_ENDPOINT")) and (
+        env.get("OTEL_SDK_DISABLED", "").strip().lower() != "true"
+    )
+    instance_id = None
+    if exporting:
+        try:
+            instance_id = identity.install_id(env)
+        except ValueError as e:
+            raise SystemExit(f"fleet-worker: {e}") from None
     # Both are no-ops unless the [otel] extra and OTEL_EXPORTER_OTLP_ENDPOINT are there.
     metrics, flush_metrics = telemetry.setup_metrics(env, instance_id)
     worker, client = build(config, metrics)

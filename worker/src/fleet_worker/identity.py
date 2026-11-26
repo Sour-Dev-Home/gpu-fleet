@@ -47,7 +47,15 @@ def _store(path: Path, value: str) -> str:
     """Write `value` unless another start got there first; return what the file now holds."""
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # Never open through a name someone else may have planted (a symlink to a file of the user's
+    # that we would then overwrite): O_EXCL refuses an existing name, symlinks included. A left-over
+    # (a crash, a reused PID) is removed (unlink drops a symlink, never its target) and tried once more.
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(tmp, flags, 0o600)
+    except FileExistsError:
+        tmp.unlink()
+        fd = os.open(tmp, flags, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(value + "\n")
     try:

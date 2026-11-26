@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 import uuid
 from collections.abc import Callable, Collection, Iterable, Mapping
 
@@ -29,6 +31,10 @@ log = logging.getLogger("fleet_broker")
 # states (plus 'expired', see QueueStats) and app.DATA_CLASSES by tests/test_telemetry.py.
 JOB_STATES = ("queued", "leased", "expired", "done", "dead", "cancelled")
 DATA_CLASSES = ("footage", "derived", "open")
+
+# The three gauge callbacks of one collection run within milliseconds of each other; a second is
+# far longer than that and far shorter than any export interval (default 60 s).
+STATS_CACHE_SECONDS = 1.0
 
 TURNAROUND_BUCKETS = (1, 5, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200)
 
@@ -61,11 +67,25 @@ class OtelMetrics(Metrics):
         provider,
         stats: Callable[[], tuple[float, QueueStats]],
         claimability: Claimability | None = None,
+        cache_seconds: float = STATS_CACHE_SECONDS,
+        cache_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         from opentelemetry.metrics import Observation
 
         self.provider = provider
         meter = provider.get_meter("fleet_broker")
+        read = stats
+        cached: list = []  # [read at, result]
+        lock = threading.Lock()
+
+        def stats() -> tuple[float, QueueStats]:
+            """The gauges of one collection share one read: stats() is 3 queries, and each of the
+            three callbacks would otherwise make its own (9 per export)."""
+            with lock:
+                at = cache_clock()
+                if not cached or not 0 <= at - cached[0] < cache_seconds:
+                    cached[:] = [at, read()]
+                return cached[1]
 
         def jobs(_options) -> Iterable[Observation]:
             _, s = stats()

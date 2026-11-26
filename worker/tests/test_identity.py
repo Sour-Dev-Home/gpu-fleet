@@ -98,6 +98,48 @@ def test_the_file_is_requested_user_only_on_every_os(tmp_path, monkeypatch):
     assert modes == [0o600]
 
 
+def test_the_temp_file_is_created_exclusively_and_never_through_a_symlink(tmp_path, monkeypatch):
+    flags = []
+    real_open = os.open
+
+    def spy(path, f, mode=0o777, **kw):
+        flags.append(f)
+        return real_open(path, f, mode, **kw)
+
+    monkeypatch.setattr(os, "open", spy)
+    identity.install_id(env_for(tmp_path), windows=False)
+    (f,) = flags
+    assert f & os.O_CREAT and f & os.O_EXCL and f & os.O_WRONLY
+    assert not f & os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        assert f & os.O_NOFOLLOW
+
+
+def test_a_planted_temp_name_is_replaced_and_what_it_pointed_at_is_untouched(tmp_path):
+    folder = tmp_path / "xdg" / "fleet"
+    folder.mkdir(parents=True)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("precious", encoding="utf-8")
+    planted = folder / f"worker-id.{os.getpid()}.tmp"
+    try:
+        planted.symlink_to(victim)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks need a privilege here")
+    value = identity.install_id(env_for(tmp_path), windows=False)
+    assert victim.read_text(encoding="utf-8") == "precious"
+    assert (folder / "worker-id").read_text(encoding="utf-8").strip() == value
+    assert list(folder.iterdir()) == [folder / "worker-id"]
+
+
+def test_a_left_over_temp_file_is_removed_and_the_write_retried(tmp_path):
+    folder = tmp_path / "xdg" / "fleet"
+    folder.mkdir(parents=True)
+    (folder / f"worker-id.{os.getpid()}.tmp").write_text("stale", encoding="utf-8")
+    value = identity.install_id(env_for(tmp_path), windows=False)
+    assert (folder / "worker-id").read_text(encoding="utf-8").strip() == value
+    assert list(folder.iterdir()) == [folder / "worker-id"]
+
+
 def test_a_damaged_file_is_replaced_not_trusted(tmp_path):
     env = env_for(tmp_path)
     path = tmp_path / "xdg" / "fleet" / "worker-id"

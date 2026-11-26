@@ -121,6 +121,19 @@ def test_an_existing_database_gets_the_new_state_in_its_constraint(db_url):
     JobStore(tracked_pool(db_url))  # and a second start is a no-op
 
 
+def test_a_second_start_leaves_the_widened_constraint_alone(db_url):
+    # Dropping and re-adding it would take ACCESS EXCLUSIVE and re-scan the table on every
+    # start: a new constraint has a new oid, so an unchanged oid means the migration skipped.
+    query = "SELECT oid FROM pg_constraint WHERE conrelid = 'jobs'::regclass AND conname = %s"
+    JobStore(tracked_pool(db_url))
+    with psycopg.connect(db_url, autocommit=True) as conn:
+        before = conn.execute(query, ("jobs_state_check",)).fetchone()
+    assert before is not None
+    JobStore(tracked_pool(db_url))
+    with psycopg.connect(db_url, autocommit=True) as conn:
+        assert conn.execute(query, ("jobs_state_check",)).fetchone() == before
+
+
 # --- HTTP ---
 
 
