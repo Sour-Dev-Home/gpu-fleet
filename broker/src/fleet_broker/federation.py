@@ -24,7 +24,7 @@ from botocore.credentials import RefreshableCredentials
 METADATA_IDENTITY_URL = (
     "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity"
 )
-METADATA_TIMEOUT = 5.0  # seconds: the metadata server is on the same host
+METADATA_TIMEOUT = 3.0  # seconds: the metadata server is on the same host
 SESSION_NAME = "fleet-broker"  # shows in CloudTrail as the assumed-role session
 # Presigned URL lifetimes (s3.py GET_SECONDS, PUT_SECONDS) must stay <= botocore's 10-15 minute refresh margin.
 SESSION_SECONDS = 3600  # the role's max_session_duration (Terraform) is the same
@@ -44,7 +44,15 @@ def fetch_id_token(audience: str, opener: Callable[..., Any] = urllib.request.ur
 def sts_client(region: str):
     """STS, unsigned: AssumeRoleWithWebIdentity is authorised by the token in the request, and
     a signing client would go looking for credentials the broker does not have yet."""
-    return boto3.client("sts", region_name=region, config=Config(signature_version=UNSIGNED))
+    # Same limits as s3.client_config: botocore's defaults (60 s timeouts, legacy retries) would stall
+    # startup past Cloud Run's 30 s probe window and hang a refresh during a request.
+    config = Config(
+        signature_version=UNSIGNED,
+        retries={"max_attempts": 2, "mode": "standard"},
+        connect_timeout=3,
+        read_timeout=5,
+    )
+    return boto3.client("sts", region_name=region, config=config)
 
 
 def make_credentials(
