@@ -1,11 +1,12 @@
 """Queue statistics and completion facts behind the ADR 0018 metrics."""
 
 import psycopg
+from fleet_broker.addressing import result_key
 from fleet_broker.store import JobStore
 
 NOW = 1_800_000_000.0
 TTL = 60.0
-KEY = "f" * 64
+KEY = result_key("a" * 64, "m", "v1")  # job "a" in these tests
 ANY = {"clearance": {"footage", "derived", "open"}, "capabilities": {"v1"}, "models": {"m"}}
 
 

@@ -25,6 +25,7 @@ from typing import Annotated, Literal, get_args
 
 import psycopg
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -32,7 +33,7 @@ from . import jsonlog, telemetry
 from .auth import bearer_matches
 from .bodylimit import BodyLimit
 from .ratelimit import TokenBucket, retry_after
-from .store import POOL_TIMEOUT, JobStore, is_unavailable, make_pool
+from .store import POOL_TIMEOUT, JobStore, ResultKeyMismatch, is_unavailable, make_pool
 from .telemetry import Metrics
 
 log = logging.getLogger("fleet_broker")
@@ -293,9 +294,24 @@ def create_app(
 
     @app.post("/complete", status_code=204, dependencies=worker)
     def complete(done: Completion, s: Store) -> None:
-        accepted = s.complete(done.job_id, done.lease_token, done.result_key, now=clock())
+        try:
+            accepted = s.complete(done.job_id, done.lease_token, done.result_key, now=clock())
+        except ResultKeyMismatch:
+            # Not the job's content address (ADR 0023). 422, not the 409 of a lost lease: the
+            # worker must not read this as "someone else has it", and it is not transient.
+            # The job id only: the key is the client's claim, not ours to log.
+            log.warning("result key refused for job %s", done.job_id)
+            metrics.result_rejected()
+            # "code" is for the worker: FastAPI's own 422s (a malformed body) carry none.
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "detail": "result_key is not this job's content address",
+                    "code": "result_key_mismatch",
+                },
+            )
         if accepted is None:
-            raise HTTPException(status_code=409, detail="lease lost or different result")
+            raise HTTPException(status_code=409, detail="lease lost")
         metrics.completed(accepted)
 
     stop_tracing = tracing(app) if tracing else (lambda: None)

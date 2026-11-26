@@ -75,6 +75,39 @@ def test_rate_limited_or_busy_is_retried_later(status):
         b.heartbeat(a_lease(received_at=1000.0))
 
 
+def test_a_refused_result_key_is_neither_lease_lost_nor_transient():
+    # 422 from /complete: the broker recomputed the content address and it differs (ADR 0023).
+    from fleet_worker.loop import ResultRejected, TransientError
+
+    clock = FakeClock()
+    coded = {"detail": "x", "code": "result_key_mismatch"}
+    b = broker({"/complete": httpx.Response(422, json=coded)}, clock)
+    with pytest.raises(ResultRejected) as e:
+        b.complete(a_lease(received_at=1000.0), "f" * 64)
+    assert not isinstance(e.value, (LeaseLost, TransientError))
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(422, json={"detail": [{"loc": ["body"], "msg": "bad", "type": "x"}]}),
+        httpx.Response(422, json={"detail": "x", "code": "something_else"}),
+        httpx.Response(422, content=b"not json"),
+    ],
+)
+def test_any_other_422_is_not_a_refused_key(response):
+    # FastAPI answers 422 for a malformed body too: that is a bug to stop on, not ResultRejected.
+    b = broker({"/complete": response}, FakeClock())
+    with pytest.raises(httpx.HTTPStatusError):
+        b.complete(a_lease(received_at=1000.0), "f" * 64)
+
+
+def test_complete_409_is_still_lease_lost():
+    b = broker({"/complete": httpx.Response(409)}, FakeClock())
+    with pytest.raises(LeaseLost):
+        b.complete(a_lease(received_at=1000.0), "f" * 64)
+
+
 def test_other_errors_are_not_mistaken_for_lease_lost():
     clock = FakeClock()
     b = broker({"/heartbeat": httpx.Response(401)}, clock)

@@ -98,6 +98,31 @@ def test_custom_validator_is_used():
     assert broker.completed == []
 
 
+def test_a_refused_result_key_stops_the_worker_without_leasing_more(caplog):
+    # A mismatch means this worker's key formula is wrong: every further job would fail the
+    # same way and burn its attempts, so the worker exits like on an unsupported prompt version.
+    from fleet_worker.loop import ResultRejected
+
+    worker, broker, _ = make([])
+    queue = [lease_for(), lease_for(Job("j2", "b" * 64, "m", "v1"))]
+    leased, sleeps = [], []
+
+    def next_lease():
+        leased.append(queue[0].job.job_id)
+        return queue.pop(0)
+
+    def refusing_complete(lease, key):
+        raise ResultRejected(lease.job.job_id)
+
+    broker.lease, broker.complete = next_lease, refusing_complete
+    with pytest.raises(SystemExit) as e:
+        worker.run(sleep=sleeps.append, backoff=Backoff(base=1, cap=60, rng=lambda: 1.0))
+    assert isinstance(e.value, ResultRejected)
+    assert leased == ["j1"]  # j2 was never leased
+    assert sleeps == []
+    assert "j1" in caplog.text and "j1" in str(e.value)
+
+
 def test_lease_lost_does_not_stop_the_worker():
     worker, broker, _ = make([lease_for(), lease_for(Job("j2", "b" * 64, "m", "v1"))])
     calls = []

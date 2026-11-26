@@ -25,6 +25,21 @@ class TransientError(Exception):
     """The broker is unreachable or failing (network error, 5xx). Wait and try again."""
 
 
+class ResultRejected(SystemExit):
+    """The broker refused the result key (422, code result_key_mismatch, ADR 0023): it is not
+    the job's content address. Not LeaseLost (the lease is fine) and not transient (a retry
+    sends the same key). It means this worker's key formula differs from the broker's, so every
+    job would fail the same way: the worker stops, like on an unsupported prompt version, and
+    the lease expires. The result object it already stored is harmless (nothing points to it)."""
+
+    def __init__(self, job_id: str):
+        super().__init__(
+            f"the broker refused the result key for job {job_id}: the worker's key "
+            "formula differs from the broker's; stopping"
+        )
+        self.job_id = job_id
+
+
 class InvalidResult(Exception):
     """The runner's output failed validation. It is never stored, so it never gets a content
     address and can never be served from the cache. The lease is left to expire: the job is
@@ -236,6 +251,9 @@ class Worker:
                 log.warning("lease lost on %s; moving on", e)
                 backoff.reset()
                 continue
+            except ResultRejected as e:
+                log.error("broker refused the result key for job %s; stopping", e.job_id)
+                raise  # not retried and not skipped: see the class docstring
             except InvalidResult as e:
                 log.warning("invalid result, not stored: %s", e)
                 sleep(backoff.next_delay())  # a runner that always fails must not spin

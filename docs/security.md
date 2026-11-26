@@ -57,13 +57,15 @@ Out of scope everywhere: an attacker on the maintainer's own PC (they would alre
   maintainer's, or a leaked token) can use up the shared poll bucket and slow the others. Heartbeats have
   their own bucket, so a `/lease` hot loop can't cost running jobs their leases; results are
   content-addressed, so the worst case is churn, not loss. Per-worker tokens and buckets fix it (below).
-- Accepted until phase 10 (backlog): the broker trusts the `result_key` a worker reports on completion;
-  it does not check that the result exists or matches the job's inputs.
+- [x] The broker no longer trusts the `result_key` a worker reports: it recomputes the content address
+      from the job's own fields and answers 422 to a mismatch, so a worker can't complete job A with job
+      B's result (ADR 0023, Q66). Still open: it does not check that the result exists in storage or is
+      valid (quarantine, below).
 - [ ] Run the security-reviewer again on the deployment (Terraform, IAM, Cloud Run settings).
 
 **Before phase 10 (volunteers):**
 - [ ] Per-worker identity: individual hashed tokens, revocation, and every result recording its worker (ADR 0007).
 - [ ] Lease caps per worker, and only count attempts from workers in good standing. Otherwise one bad worker can
       lease everything and push every job to `dead` in about `max_attempts × TTL`.
-- [ ] Result integrity: the broker computes `result_key` itself instead of trusting the client. Volunteer results
+- [ ] Result integrity (the key itself is done, ADR 0023): volunteer results
       go to a quarantine prefix and are promoted only after a check or after a second worker agrees.

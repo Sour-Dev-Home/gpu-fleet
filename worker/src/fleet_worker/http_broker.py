@@ -8,7 +8,7 @@ from dataclasses import replace
 import httpx
 
 from . import telemetry
-from .loop import LeaseLost, TransientError
+from .loop import LeaseLost, ResultRejected, TransientError
 from .protocol import Job, Lease
 
 
@@ -18,6 +18,16 @@ def _is_loopback_ip(host: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def _error_code(r: httpx.Response) -> str | None:
+    """The machine-readable "code" of a broker error body, or None if there is none."""
+    try:
+        body = r.json()
+    except ValueError:
+        return None
+    code = body.get("code") if isinstance(body, dict) else None
+    return code if isinstance(code, str) else None
 
 
 class HttpBroker:
@@ -108,4 +118,8 @@ class HttpBroker:
             # The result is already stored under its content key, so nothing is lost:
             # whoever holds the job now will find it and complete cheaply.
             raise LeaseLost(lease.job.job_id)
+        if r.status_code == 422 and _error_code(r) == "result_key_mismatch":
+            # The broker recomputed the content address and it differs (ADR 0023). Only this code:
+            # FastAPI answers 422 for a malformed body too, and that stays an HTTP error.
+            raise ResultRejected(lease.job.job_id)
         r.raise_for_status()
