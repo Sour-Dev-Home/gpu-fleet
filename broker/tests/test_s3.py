@@ -286,6 +286,25 @@ def test_the_id_token_is_fetched_from_the_metadata_server_for_the_audience():
     assert timeout <= 10
 
 
+def test_the_metadata_token_request_has_a_short_timeout():
+    seen = []
+
+    def opener(request, timeout):
+        seen.append(timeout)
+        return FakeResponse(b"t")
+
+    federation.fetch_id_token("a", opener=opener)
+    assert seen[0] <= 3
+
+
+def test_the_sts_client_has_short_timeouts_and_bounded_retries():
+    cfg = federation.sts_client("us-east-1").meta.config
+    assert (cfg.connect_timeout, cfg.read_timeout) == (3, 5)
+    assert cfg.retries["mode"] == "standard"
+    assert cfg.retries["total_max_attempts"] == 3  # botocore's form of max_attempts=2 (retries)
+    assert cfg.signature_version == federation.UNSIGNED
+
+
 class FakeSts:
     def __init__(self, lifetime: float = 3600.0) -> None:
         self.calls: list[dict] = []

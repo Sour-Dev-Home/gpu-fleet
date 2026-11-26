@@ -208,3 +208,11 @@ explained all four, then 2 of 3 on the recap (missed: no data means the broker s
   two-permission custom role bound on that one service; every IAM change it makes emails an audit-log alert. The
   drill fired it end to end in about 2 minutes (403 at the edge, the alert email) and a reviewed `terraform apply`
   restored service. 14 resources, about $0 a month. ADR 0024.
+- **2026-11-26: a job across both clouds, no stored keys.** The Cloud Run broker federates to AWS (Google ID token
+  → STS, trust pinned to its service account's unique ID) and signs presigned S3 URLs; S3 measured enforcing the
+  signed length, SHA-256 and no-overwrite (403 / 400 / 412). The real worker package on the maintainer's PC leased
+  from Cloud Run, downloaded and verified the input from S3, uploaded the result, and completed: lease to done in
+  about 1.4 s, cold start included. ADR 0025.
+  - Lesson: the first attempt sat silent because the test job named model `qwen3:8b` while the echo runner
+    declares `echo`. The broker correctly skipped it (ADR 0015) and nothing made that visible; step 6 adds a
+    "queued but unclaimable" signal and a worker startup line stating its declaration.

@@ -122,7 +122,9 @@ The Cloud Run wiring (`infra/gcp/fleet/cloudrun.tf`) reads the bucket and role A
 (`data "terraform_remote_state" "aws"`, same state bucket, key `aws/fleet/terraform.tfstate`), so no new secret or
 variable carries them. The audience is the variable `aws_federation_audience` (a test checks it equals the AWS
 stack's `federation_audience`). `s3_mode` (default true) sets or removes all four settings together: a rollback is
-`-var s3_mode=false`, no code change, and it skips the remote state read.
+`-var s3_mode=false`, no code change, and it skips the remote state read. The `broker_role_arn` output is
+`sensitive`, so the account ID in the ARN shows as `(sensitive)` in every GCP plan; the STS client also has explicit
+3 s connect and 5 s read timeouts, and the metadata-server request 3 s, so a hung call cannot outlast the startup probe.
 
 **First run (2026-11-26).** The broker fetches AWS credentials at startup, so revision 2 becoming Ready was the first
 successful federation (`:sub`, `:aud` and `:oaud` all matched). A cloud smoke test then ran one `open` job end to

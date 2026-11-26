@@ -171,6 +171,11 @@ def test_role_arn_is_an_output():
     assert "aws_iam_role.broker.arn" in out
 
 
+def test_role_arn_output_is_sensitive_to_keep_the_account_id_out_of_plans():
+    out = block("outputs.tf", 'output "broker_role_arn"')
+    assert re.search(r"sensitive\s*=\s*true", out)
+
+
 def test_no_google_identifier_is_committed():
     # unique IDs are 21 digits: none may appear in the stack's files (tfvars are git-ignored)
     for path in STACK.glob("*.tf"):
