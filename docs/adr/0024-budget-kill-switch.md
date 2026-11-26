@@ -52,7 +52,17 @@ unauthenticated requests costs money until someone notices. A budget alert only 
 - **Accepted residual risk, with detection.** A per-service `setIamPolicy` can grant any role on the broker, so a
   compromised switch could grant itself or others access. A log-match alert emails on every Admin Activity
   `SetIamPolicy` on the broker by the switch's account. A filter cannot tell an add from a remove, and each one
-  should be rare and expected, so all are reported (filter syntax UNVERIFIED until the drill).
+  should be rare and expected, so all are reported (filter syntax confirmed by the drill).
+
+## Drill (2026-11-26, after the first apply of 14 resources)
+A fake notification (`costAmount` 21, `budgetAmount` 20) published to the topic. Within about 2 minutes the switch
+logged "budget reached: public access removed", `allUsers` was gone from the broker's invoker role, `GET /nope`
+returned Google's 403 instead of the broker's JSON 404, and the IAM-change alert email arrived. The restore plan
+showed exactly the `public` binding to add, with the `broker_is_public` warning; the apply restored it and `/nope`
+returned the broker's 404 again. Confirmed by it: the custom role works on a per-service binding, the OIDC push and
+the Pub/Sub token-creator grant, and the log-match filter. Still unproven: that Cloud Billing itself can publish
+(only a real notification shows it). Lesson: probe with a GET; a bodyless POST gets Google's 411 before any IAM
+check, which hid the 403 at first.
 
 ## Consequences
 - **Delay.** Budget data lags by hours, and the first notification can take several. The switch caps damage; it
@@ -61,9 +71,8 @@ unauthenticated requests costs money until someone notices. A budget alert only 
   messages a day. Check the first bill.
 - Two more APIs (`billingbudgets`, `pubsub`), the provider's `billing_project` / `user_project_override`, and a
   `TF_VAR_billing_account` in the vault (sensitive, never committed).
-- UNVERIFIED until deployed: that Cloud Billing's publisher is `billing-budget-alert@system.gserviceaccount.com`,
-  that the Pub/Sub service agent needs the token-creator grant on the pusher account. The drill (README) proves the
-  push, token and IAM edit; only a real notification proves Billing can publish.
+- UNVERIFIED until a real notification arrives: that Cloud Billing's publisher is
+  `billing-budget-alert@system.gserviceaccount.com`. The drill proved the push, token and IAM edit.
 - Drilling makes the broker unreachable for about a minute.
 
 ## Alternatives considered

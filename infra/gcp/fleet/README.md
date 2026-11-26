@@ -235,7 +235,8 @@ a minute or so, so do it when nobody depends on it:
 ```powershell
 gcloud pubsub topics publish fleet-budget --message='{"costAmount": 21, "budgetAmount": 20}'
 # wait up to a minute, then:
-curl.exe -i "$url/nope"        # expect 403 (Google's page); the killswitch logs say "public access removed"
+curl.exe -i "$url/nope"        # a GET: expect 403 (Google's page); the killswitch logs say "public access removed"
+                               # (not a bodyless POST: Google answers 411 before any IAM check)
 tf plan                        # expect the public binding "to add"
 tf apply                       # restores it; the broker answers 404 JSON on /nope again
 ```
