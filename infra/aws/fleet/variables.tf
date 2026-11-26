@@ -36,14 +36,14 @@ variable "broker_google_sa_unique_id" {
   }
 }
 
-variable "admin_role_arn" {
-  description = "The maintainer's admin role: with the broker's role, the only principals that may read, write or delete objects in the results bucket (Q94). The ROLE's ARN (an SSO role's includes its path), not an assumed-role session ARN: aws:PrincipalArn of a session is the role's ARN. From TF_VAR_admin_role_arn (vault), never committed; contains the account ID."
+variable "admin_principal_arn" {
+  description = "The maintainer's admin principal: with the broker's role, the only principals that may read, write or delete objects in the results bucket (Q94). An IAM user's aws:PrincipalArn is its user ARN (arn:aws:iam::<account>:user/<path and name>); a role session's is the role's ARN (an SSO role's includes its path). Never an assumed-role session ARN (arn:aws:sts::). Get it with `aws sts get-caller-identity --query Arn`. From TF_VAR_admin_principal_arn (vault), never committed; contains the account ID."
   type        = string
   sensitive   = true
 
   validation {
-    condition     = can(regex("^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/*-]+$", var.admin_role_arn))
-    error_message = "admin_role_arn must be a role ARN: arn:aws:iam::<12 digits>:role/<path and name> (not an assumed-role session ARN)."
+    condition     = can(regex("^arn:aws:iam::[0-9]{12}:(user|role)/[A-Za-z0-9+=,.@_/*-]+$", var.admin_principal_arn))
+    error_message = "admin_principal_arn must be an IAM user or role ARN: arn:aws:iam::<12 digits>:user/<path and name> or :role/<path and name> (not an assumed-role session ARN)."
   }
 }
 

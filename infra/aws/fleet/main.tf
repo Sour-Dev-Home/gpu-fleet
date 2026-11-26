@@ -12,5 +12,5 @@ module "results" {
 
   # Q94: only the broker's role and the maintainer's admin role touch objects (see the module). The probe script
   # and `aws s3` on this bucket must run as the admin role, or they get 403.
-  data_allowed_principal_arns = [aws_iam_role.broker.arn, var.admin_role_arn]
+  data_allowed_principal_arns = [aws_iam_role.broker.arn, var.admin_principal_arn]
 }

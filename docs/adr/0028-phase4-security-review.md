@@ -1,6 +1,6 @@
 # 0028. Phase 4 security review: a flood trips the kill switch, a data-plane lock on the results bucket
 
-**Status:** Proposed (maintainer's decisions Q93-Q95, 2026-11-26; awaiting approval of the ADR)
+**Status:** Accepted (maintainer, 2026-11-26, Q93-Q95)
 **Date:** 2026-11-26
 **Builds on:** [0024](0024-budget-kill-switch.md), [0025](0025-presigned-urls-and-aws-federation.md),
 [0027](0027-telemetry-destination.md).
@@ -22,8 +22,9 @@ directory, a default data class on `fleet-enqueue`).
    topic only. A worker with a wrong token polls about once a second, well under the threshold.
 2. **Data-plane lock (Q94).** The results bucket policy denies `s3:GetObject`, `PutObject` and `DeleteObject` on
    `inputs/*` and `results/*` to every principal except the broker role and the admin role
-   (`var.admin_role_arn`, sensitive, from the vault), matched with `ArnNotLike` on `aws:PrincipalArn` (a role's ARN,
-   which is also what an assumed-role session reports). Object actions only: Terraform's bucket management cannot be
+   (`var.admin_principal_arn`, sensitive, from the vault), matched with `ArnNotLike` on `aws:PrincipalArn` (an IAM
+   user's user ARN, or a role's ARN, which is also what an assumed-role session reports; the maintainer signs in as
+   an IAM user). Object actions only: Terraform's bucket management cannot be
    locked out. The TLS-only denies stay.
 3. **Small fixes (Q95).** Service-level `scaling.max_instance_count` (the `maxScale` annotation) equals the revision cap
    for the broker and the kill switch; `pip-audit` over the three uv lockfiles in CI, with hash-pinned tooling;

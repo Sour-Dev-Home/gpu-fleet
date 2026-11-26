@@ -68,18 +68,50 @@ def test_the_results_bucket_allows_the_broker_role_and_the_admin_role():
     main = code("fleet/main.tf")
     m = main[main.index('module "results"') :]
     assert re.search(
-        r"data_allowed_principal_arns\s*=\s*\[\s*aws_iam_role\.broker\.arn,\s*var\.admin_role_arn\s*\]",
+        r"data_allowed_principal_arns\s*=\s*\[\s*aws_iam_role\.broker\.arn,\s*var\.admin_principal_arn\s*\]",
         m,
     )
 
 
-def test_admin_role_arn_is_a_sensitive_validated_role_arn_with_no_default():
+def _admin_variable_block():
     v = code("fleet/variables.tf")
-    b = v[v.index('variable "admin_role_arn"') :]
-    b = b[: b.index("\n}\n")]
+    b = v[v.index('variable "admin_principal_arn"') :]
+    return b[: b.index("\n}\n")]
+
+
+def test_admin_principal_arn_is_a_sensitive_validated_arn_with_no_default():
+    b = _admin_variable_block()
     assert "sensitive   = true" in b
     assert "default" not in b
-    assert "arn:aws:iam::" in b and "role/" in b and "validation" in b
+    assert "arn:aws:iam::" in b and "validation" in b
+
+
+def _validation_regex():
+    m = re.search(
+        r'regex\("((?:[^"\\]|\\.)*)",\s*var\.admin_principal_arn', _admin_variable_block()
+    )
+    assert m, "validation regex not found"
+    # HCL "..." string -> Python pattern (only \\ escapes are used here)
+    return re.compile(m.group(1).replace("\\\\", "\\"))
+
+
+def test_admin_principal_arn_accepts_a_user_arn_and_a_role_arn():
+    rx = _validation_regex()
+    assert rx.search("arn:aws:iam::123456789012:user/maintainer")
+    assert rx.search("arn:aws:iam::123456789012:user/team/path/maintainer")
+    assert rx.search("arn:aws:iam::123456789012:role/admin")
+    assert rx.search(
+        "arn:aws:iam::123456789012:role/aws-reserved/sso.amazonaws.com/us-east-1/AWSReservedSSO_Admin_abc"
+    )
+
+
+def test_admin_principal_arn_rejects_session_arns_and_garbage():
+    rx = _validation_regex()
+    assert not rx.search("arn:aws:sts::123456789012:assumed-role/admin/session")
+    assert not rx.search("arn:aws:iam::123456789012:root")
+    assert not rx.search("arn:aws:iam::12345:user/maintainer")
+    assert not rx.search("maintainer")
+    assert not rx.search("")
 
 
 def test_no_account_id_or_role_arn_literal_is_committed():
@@ -90,6 +122,8 @@ def test_no_account_id_or_role_arn_literal_is_committed():
 
 def test_the_docs_say_which_principal_the_probe_and_terraform_run_as():
     probe = (ROOT / "scripts" / "probe-presign.py").read_text(encoding="utf-8")
-    assert "admin_role_arn" in probe
+    assert "admin_principal_arn" in probe
     readme = (AWS / "README.md").read_text(encoding="utf-8")
-    assert "TF_VAR_admin_role_arn" in readme and "session" in readme
+    assert "TF_VAR_admin_principal_arn" in readme and "session" in readme
+    assert "get-caller-identity" in readme and "Set-Secret" in readme
+    assert "admin_role_arn" not in readme

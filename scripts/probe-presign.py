@@ -9,7 +9,7 @@ bucket, with your own login (no keys are stored anywhere). From the repo root:
     uv run --directory broker python ../scripts/probe-presign.py --bucket <results bucket>
 
 (the bucket name is `terraform output results_bucket` in infra/aws/fleet). The bucket policy lets only the
-broker role and the admin role (`admin_role_arn`, Q94) touch objects, so the login above must be that admin
+broker role and the admin role (`admin_principal_arn`, Q94) touch objects, so the login above must be that admin
 role: from any other principal the control upload gets 403 and the probe exits 2. It uses the broker's
 own signing code, writes only under results/probe/<random>/ and deletes everything it wrote.
 

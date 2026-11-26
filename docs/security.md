@@ -80,7 +80,7 @@ Out of scope everywhere: an attacker on the maintainer's own PC (they would alre
       no-overwrite is measured by `scripts/probe-presign.py`.
 - [x] Data-plane lock on the results bucket (Q94): the bucket policy denies `s3:GetObject`, `PutObject` and
       `DeleteObject` on `inputs/*` and `results/*` to every principal except the broker role and the maintainer's
-      admin role (`admin_role_arn`, by `aws:PrincipalArn`), so a leaked or over-broad identity in the account cannot
+      admin principal (`admin_principal_arn`, by `aws:PrincipalArn`), so a leaked or over-broad identity in the account cannot
       reach the data. The TLS-only denies stay. Object actions only, so Terraform cannot lock itself out.
 - [x] Security review of the deployment (Terraform, IAM, Cloud Run settings), 2026-11-26: Q93-Q95. Re-run on the next
       change to IAM, networking or exposure.
