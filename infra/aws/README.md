@@ -54,6 +54,25 @@ terraform apply tfplan
 terraform output broker_role_arn   # FLEET_AWS_ROLE_ARN: contains the account ID, so never commit it
 ```
 
+**Object lock (Q94).** The results bucket's policy denies `s3:GetObject`, `PutObject` and `DeleteObject` on `inputs/*`
+and `results/*` to every principal except the broker role and your admin principal, so a leaked or over-broad identity in
+the account cannot reach the data. Set the admin principal first (in the vault, never committed). Get the value
+you sign in as, store it (prompted, never on the command line), and pass it through `scripts/with-secrets.ps1`
+alongside `TF_VAR_broker_google_sa_unique_id`:
+
+```powershell
+aws sts get-caller-identity --profile fleet --query Arn --output text   # arn:aws:iam::<account>:user/<name>
+Set-Secret -Vault fleet -Name TF_VAR_admin_principal_arn                # paste the ARN at the prompt
+```
+
+An IAM user's `aws:PrincipalArn` is its user ARN (`arn:aws:iam::<account>:user/<path>/<name>`); a role session's is
+the role's ARN, never the session ARN (`arn:aws:sts::...:assumed-role/<role>/<session>`, which the variable rejects).
+An SSO role's ARN includes its path (`role/aws-reserved/sso.amazonaws.com/<region>/AWSReservedSSO_...`).
+Only object actions are denied, so Terraform (which manages the bucket and never reads objects) cannot lock itself
+out, and a wrong value is fixed by re-applying as admin. The probe script below must run as that admin principal (a
+session of any other principal gets 403 on the control upload). Presigned uploads are evaluated as the broker
+role that signed them, so workers are unaffected.
+
 Workers in S3 mode need `FLEET_RESULTS_HOST` = `<bucket>.s3.amazonaws.com` (us-east-1; `<bucket>.s3.<region>.amazonaws.com`
 elsewhere): they refuse presigned URLs for any other host. After the apply, check once with the role (not your
 login) that a HEAD of a key that does not exist answers 404, not 403 (ADR 0025: ListBucket on the bucket has no

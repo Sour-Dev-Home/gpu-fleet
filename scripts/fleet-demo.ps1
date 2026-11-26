@@ -48,7 +48,7 @@ function Invoke-Run([string]$Runner, [string]$PromptVersion, [int]$Workers) {
   # echo jobs name the placeholder model "echo" (fleet-enqueue's default for echo-v1, ADR 0015);
   # only the smoke jobs name the real model.
   $modelArgs = if ($Runner -eq 'smoke') { @('--model', $Model) } else { @() }
-  Invoke-Compose run --rm broker fleet-enqueue --demo $Jobs --prompt-version $PromptVersion @modelArgs
+  Invoke-Compose run --rm broker fleet-enqueue --demo $Jobs --data-class open --prompt-version $PromptVersion @modelArgs
 
   $clock = [Diagnostics.Stopwatch]::StartNew()
   $deadline = (Get-Date).AddMinutes($TimeoutMinutes)

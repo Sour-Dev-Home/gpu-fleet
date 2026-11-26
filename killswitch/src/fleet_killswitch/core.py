@@ -14,6 +14,8 @@ import binascii
 import json
 import math
 import sys
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -21,6 +23,8 @@ from google.api_core import exceptions as gexc
 
 INVOKER = "roles/run.invoker"
 PUBLIC = "allUsers"
+MAX_AGE_S = 3600  # replay window for the flood alert's started_at (ADR 0028)
+MAX_SKEW_S = 300  # clock skew allowed for a started_at in the future
 
 
 class Iam(Protocol):
@@ -57,12 +61,99 @@ def parse_push(body: bytes) -> tuple[float, float] | None:
         note = json.loads(data)
     except (ValueError, KeyError, TypeError, binascii.Error):  # UnicodeDecodeError is a ValueError
         return None
-    if not isinstance(note, dict):
+    if (
+        not isinstance(note, dict) or "incident" in note
+    ):  # shapes are exclusive: an alert is not a budget
         return None
     cost, budget = _amount(note.get("costAmount")), _amount(note.get("budgetAmount"))
     if cost is None or budget is None or budget <= 0:
         return None
     return cost, budget
+
+
+def parse_alert(body: bytes) -> tuple[str, str, object] | None:
+    """(state, policy_name, started_at) from a Cloud Monitoring Pub/Sub notification, or None if it is not one.
+
+    STRICT: `version` must be "1.2", state and policy_name must be strings in `incident`, and a message
+    carrying budget fields is not an alert. started_at is returned raw (None if absent); handle_alert
+    validates it.
+    """
+    try:
+        envelope = json.loads(body)
+        data = base64.b64decode(envelope["message"]["data"], validate=True)
+        note = json.loads(data)
+    except (ValueError, KeyError, TypeError, binascii.Error):
+        return None
+    if not isinstance(note, dict) or note.get("version") != "1.2":
+        return None
+    if "costAmount" in note or "budgetAmount" in note:
+        return None
+    incident = note.get("incident")
+    if not isinstance(incident, dict):
+        return None
+    state, policy = incident.get("state"), incident.get("policy_name")
+    if not isinstance(state, str) or not isinstance(policy, str):
+        return None
+    return state, policy, incident.get("started_at")
+
+
+def _fresh(started_at: object, now: float) -> bool:
+    """True if started_at (epoch seconds) is a real number no more than MAX_AGE_S in the past and no more than
+    MAX_SKEW_S in the future. Anything undatable (missing, bool, string, NaN) is not fresh, and neither is a
+    far-future date, which would otherwise stay "fresh" forever."""
+    if isinstance(started_at, bool) or not isinstance(started_at, (int, float)):
+        return False
+    if not math.isfinite(started_at):
+        return False
+    return -MAX_SKEW_S <= now - started_at <= MAX_AGE_S
+
+
+def handle_alert(
+    body: bytes, iam: Iam, service: str, policy: str, now: Callable[[], float] = time.time
+) -> int:
+    """The flood alert (Q93). Acts only on a fresh OPEN incident of the one expected policy (`policy`, from
+    the environment, compared by exact equality); everything else is logged and acknowledged, never raised.
+
+    Attacker-chosen strings (policy_name, state) are never logged verbatim on the ignore paths."""
+    parsed = parse_alert(body)
+    if parsed is None:
+        log("ERROR", "not a Cloud Monitoring alert, acknowledged and ignored")
+        return 200
+    state, name, started_at = parsed
+    matches = bool(policy) and name == policy
+    if not matches:
+        log("WARNING", "alert for another policy, ignored", policy_matches=False, state=state[:16])
+        return 200
+    if state != "open":
+        log("INFO", "incident not open, nothing to do", policy_matches=True, state=state[:16])
+        return 200
+    if not _fresh(started_at, now()):
+        # Replay guard (ADR 0028): a redelivered old message must not undo a manual restore.
+        log(
+            "WARNING",
+            "incident too old or undatable, ignored",
+            policy_matches=True,
+            state=state[:16],
+        )
+        return 200
+    try:
+        outcome = trip(iam, service)
+    except Exception as exc:  # noqa: BLE001 - not fired yet: ask Pub/Sub to redeliver
+        log(
+            "ERROR",
+            "could not remove public access, will be redelivered",
+            policy=name,
+            error=type(exc).__name__,
+        )
+        return 500
+    log(
+        "WARNING",
+        f"flood alert: public access {outcome.replace('_', ' ')}",
+        policy=name,
+        outcome=outcome,
+        service=service,
+    )
+    return 200
 
 
 def remove_public(policy: Any) -> bool:

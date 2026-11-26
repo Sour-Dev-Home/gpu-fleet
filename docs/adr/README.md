@@ -33,5 +33,6 @@ updated to point to it.
 | [0025](0025-presigned-urls-and-aws-federation.md) | Presigned S3 URLs for inputs and results; the broker reaches AWS by web identity federation; /complete HEADs the stored result | Accepted (maintainer, 2026-11-25, Q74-Q80) |
 | [0026](0026-telemetry-signals.md) | Telemetry signals: `fleet.jobs.unclaimable` and its alert, `POST /jobs/{id}/cancel`, the worker's start line, install ID and metrics | Accepted (maintainer, 2026-11-26, Q84-Q87) |
 | [0027](0027-telemetry-destination.md) | Telemetry destination: Grafana Cloud Free over OTLP, one write-only token per source, a Scheduler-driven flush under request-based billing | Accepted (maintainer, 2026-11-26, Q88-Q92) |
+| [0028](0028-phase4-security-review.md) | Phase 4 security review: a flood alert trips the kill switch, a data-plane lock on the results bucket, small fixes | Accepted (Q93-Q95) |
 
 Template: Status, Date, Context, Decision, Consequences, Alternatives considered. Keep each one to a page.

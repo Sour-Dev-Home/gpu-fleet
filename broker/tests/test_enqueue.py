@@ -12,26 +12,27 @@ def test_demo_jobs_pass_the_brokers_input_rules(db_url):
     # The real contract: every demo job is accepted by the real API (ADR 0011 field rules).
     app = create_app(db_url, WORKER, ADMIN, ALL)
     admin = TestClient(app, headers={"Authorization": f"Bearer {ADMIN}"})
-    for job in demo_jobs(5, "t"):
+    for job in demo_jobs(5, "t", data_class="open"):
         assert admin.post("/jobs", json=job).status_code == 201
 
 
 def test_a_new_run_reuses_the_same_inputs_under_new_ids():
-    a, b = demo_jobs(3, "a"), demo_jobs(3, "b")
+    a, b = demo_jobs(3, "a", data_class="open"), demo_jobs(3, "b", data_class="open")
     assert [j["input_sha256"] for j in a] == [j["input_sha256"] for j in b]  # cached on run b
     assert {j["job_id"] for j in a}.isdisjoint(j["job_id"] for j in b)
     assert len({j["input_sha256"] for j in a}) == 3
 
 
 def test_missing_admin_token_is_refused(capsys):
-    assert main(["--demo", "1"], env={}) == 2
+    assert main(["--demo", "1", "--data-class", "open"], env={}) == 2
     assert "FLEET_ADMIN_TOKEN" in capsys.readouterr().err
 
 
 def test_any_rejected_job_fails_the_command(monkeypatch):
     statuses = iter([201, 401])
     monkeypatch.setattr(enqueue, "post_job", lambda *a: next(statuses))
-    assert main(["--demo", "2", "--run", "x"], env={"FLEET_ADMIN_TOKEN": ADMIN}) == 1
+    argv = ["--demo", "2", "--run", "x", "--data-class", "open"]
+    assert main(argv, env={"FLEET_ADMIN_TOKEN": ADMIN}) == 1
 
 
 def posted_jobs(monkeypatch, argv):
@@ -44,21 +45,38 @@ def posted_jobs(monkeypatch, argv):
 
 
 def test_demo_jobs_default_to_the_echo_runner_composes_default(monkeypatch):
-    jobs = posted_jobs(monkeypatch, ["--demo", "2", "--run", "x"])
+    jobs = posted_jobs(monkeypatch, ["--demo", "2", "--run", "x", "--data-class", "open"])
     # echo-v1 jobs name the placeholder model "echo", which the echo runner declares (ADR 0015)
     assert {(j["model"], j["prompt_version"]) for j in jobs} == {("echo", "echo-v1")}
 
 
 def test_a_non_echo_prompt_version_defaults_to_the_smoke_model(monkeypatch):
-    jobs = posted_jobs(monkeypatch, ["--demo", "2", "--run", "x", "--prompt-version", "smoke-v1"])
+    argv = ["--demo", "2", "--run", "x", "--data-class", "open", "--prompt-version", "smoke-v1"]
+    jobs = posted_jobs(monkeypatch, argv)
     assert {(j["model"], j["prompt_version"]) for j in jobs} == {("qwen3:8b", "smoke-v1")}
 
 
-def test_demo_jobs_are_open_by_default_and_the_class_can_be_chosen(monkeypatch):
-    jobs = posted_jobs(monkeypatch, ["--demo", "2", "--run", "x"])
+def test_the_chosen_data_class_is_what_is_posted(monkeypatch):
+    jobs = posted_jobs(monkeypatch, ["--demo", "2", "--run", "x", "--data-class", "open"])
     assert {j["data_class"] for j in jobs} == {"open"}
     jobs = posted_jobs(monkeypatch, ["--demo", "2", "--run", "x", "--data-class", "footage"])
     assert {j["data_class"] for j in jobs} == {"footage"}
+
+
+def test_data_class_is_required_and_a_missing_one_posts_nothing(monkeypatch, capsys):
+    # fail closed: no default class, so a forgotten flag can never publish footage as "open"
+    posted = []
+    monkeypatch.setattr(enqueue, "post_job", lambda *a: posted.append(a) or 201)
+    with pytest.raises(SystemExit) as exc:
+        main(["--demo", "1", "--run", "x"], env={"FLEET_ADMIN_TOKEN": ADMIN})
+    assert exc.value.code == 2
+    assert "--data-class" in capsys.readouterr().err
+    assert posted == []
+
+
+def test_demo_jobs_has_no_default_data_class():
+    with pytest.raises(TypeError):
+        demo_jobs(1, "x")  # type: ignore[call-arg]
 
 
 def test_an_unknown_data_class_is_refused(monkeypatch):
@@ -68,14 +86,16 @@ def test_an_unknown_data_class_is_refused(monkeypatch):
 
 def test_prompt_version_and_model_can_be_chosen(monkeypatch):
     # e.g. --prompt-version smoke-v1 for the smoke runner, which refuses echo-v1 jobs
-    argv = ["--demo", "2", "--run", "x", "--prompt-version", "smoke-v1", "--model", "qwen3:14b"]
+    argv = ["--demo", "2", "--run", "x", "--data-class", "open"]
+    argv += ["--prompt-version", "smoke-v1", "--model", "qwen3:14b"]
     jobs = posted_jobs(monkeypatch, argv)
     assert {(j["model"], j["prompt_version"]) for j in jobs} == {("qwen3:14b", "smoke-v1")}
 
 
 def test_all_accepted_succeeds(monkeypatch, capsys):
     monkeypatch.setattr(enqueue, "post_job", lambda *a: 201)
-    assert main(["--demo", "3", "--run", "x"], env={"FLEET_ADMIN_TOKEN": ADMIN}) == 0
+    argv = ["--demo", "3", "--run", "x", "--data-class", "open"]
+    assert main(argv, env={"FLEET_ADMIN_TOKEN": ADMIN}) == 0
     assert "3/3 jobs added" in capsys.readouterr().out
 
 
@@ -102,7 +122,8 @@ def run_enqueue(monkeypatch, net):
     monkeypatch.setattr(enqueue, "post_job", net)
     monkeypatch.setattr(enqueue, "_sleep", sleeps.append)
     monkeypatch.setattr(enqueue, "_random", lambda: 1.0)  # full jitter at its maximum
-    code = main(["--demo", "1", "--run", "x"], env={"FLEET_ADMIN_TOKEN": ADMIN})
+    argv = ["--demo", "1", "--run", "x", "--data-class", "open"]
+    code = main(argv, env={"FLEET_ADMIN_TOKEN": ADMIN})
     return code, sleeps
 
 

@@ -1,7 +1,7 @@
 # Fleet broker image (ADR 0014): the HTTP API under uvicorn, job store in PostgreSQL (ADR 0020).
 # Needs FLEET_WORKER_TOKEN, FLEET_ADMIN_TOKEN and FLEET_DATABASE_URL (it holds the database password)
 # from the environment (the vault), never from a file.
-# The same image adds jobs: docker compose run --rm broker fleet-enqueue --demo N
+# The same image adds jobs: docker compose run --rm broker fleet-enqueue --demo N --data-class open
 #
 #   docker build -t fleet-broker broker
 

@@ -1,17 +1,17 @@
 """`fleet-enqueue`: add jobs to the broker through its own API, with the admin token.
 
-  fleet-enqueue --demo 20                           20 demo jobs for the echo runner (echo-v1)
-  fleet-enqueue --demo 20 --prompt-version smoke-v1 20 demo jobs for the smoke runner
-  fleet-enqueue --demo 20 --run b                  the same 20 inputs under new job ids ("b")
+  fleet-enqueue --demo 20 --data-class open         20 demo jobs for the echo runner (echo-v1)
+  fleet-enqueue --demo 20 --data-class open --prompt-version smoke-v1   for the smoke runner
+  fleet-enqueue --demo 20 --data-class open --run b  the same 20 inputs under new job ids ("b")
   --model picks the jobs' model (default "echo" for echo-v1, else qwen3:8b).
-  --data-class footage|derived|open (default open): who may see the inputs (ADR 0015).
+  --data-class footage|derived|open is REQUIRED, with no default: who may see the inputs (ADR 0015).
   A job is leased only to a worker whose clearance covers its class and which declared its
   prompt version and model; others stay queued.
 
 Reads FLEET_ADMIN_TOKEN and FLEET_BROKER_URL (default http://127.0.0.1:8000). Plain http is
 refused unless the host is loopback or FLEET_ALLOW_HTTP=1; redirects are never followed. In Compose it
 runs inside the broker container, which already holds the admin token (ADR 0014):
-  docker compose run --rm broker fleet-enqueue --demo 20
+  docker compose run --rm broker fleet-enqueue --demo 20 --data-class open
 
 Demo inputs are numbered, so input i always hashes the same: a second run under a new label
 gets new jobs whose Results already exist, and workers complete them as "cached".
@@ -38,7 +38,6 @@ DEMO_PROMPT_VERSION = "echo-v1"
 # The echo runner declares this placeholder model; jobs for it must name it (ADR 0015).
 ECHO_MODEL = "echo"
 DATA_CLASSES = ("footage", "derived", "open")
-DEMO_DATA_CLASS = "open"  # demo inputs are made-up numbers, safe for any worker
 
 
 def default_model(prompt_version: str) -> str:
@@ -50,7 +49,8 @@ def demo_jobs(
     run: str,
     model: str | None = None,
     prompt_version: str = DEMO_PROMPT_VERSION,
-    data_class: str = DEMO_DATA_CLASS,
+    *,
+    data_class: str,
 ) -> list[dict[str, str]]:
     model = model or default_model(prompt_version)
     return [
@@ -198,8 +198,8 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
     p.add_argument(
         "--data-class",
         choices=DATA_CLASSES,
-        default=DEMO_DATA_CLASS,
-        help=f"who may see the inputs (default {DEMO_DATA_CLASS} for --demo)",
+        required=True,  # no default: a forgotten flag must not publish footage as "open" (fail closed)
+        help="who may see the inputs (required); the demo's made-up numbers are safe as open",
     )
     args = p.parse_args(argv)
     model = args.model or default_model(args.prompt_version)
@@ -218,7 +218,9 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
         check_url(base_url, allow_http)
         statuses = [
             post_job_with_retries(base_url, token, job, allow_http)
-            for job in demo_jobs(args.demo, args.run, model, args.prompt_version, args.data_class)
+            for job in demo_jobs(
+                args.demo, args.run, model, args.prompt_version, data_class=args.data_class
+            )
         ]
     except ValueError as e:  # messages here never contain the token
         print(f"fleet-enqueue: {e}", file=sys.stderr)

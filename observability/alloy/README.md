@@ -24,7 +24,9 @@ One token per source, 90-day expiry; rotation is in `infra/gcp/fleet/README.md` 
    `%ProgramData%\fleet\alloy\grafana-token` (SYSTEM and Administrators only, inheritance off, owner Administrators;
    it refuses a symlink or junction in that place), copies `observability/alloy/config.alloy` to
    `%ProgramData%\fleet\alloy\config.alloy` in the same protected directory, sets the service's environment, points
-   `run` at the COPY and restarts the service. The service runs as SYSTEM, so it must never run a file a user can
+   `run` at the COPY, pins `--storage.path` to `%ProgramData%\fleet\alloy\data` (the unsent-metrics buffer; same
+   owner and ACL, so a user cannot read or replace it; the old default under `GrafanaLabs` is no longer used) and
+   restarts the service. The service runs as SYSTEM, so it must never run a file a user can
    edit. Re-run it after rotating the token or editing the config (it refreshes the copy); it is idempotent and never
    prints the token. The environment holds the endpoint, the instance ID, the token file's path and the install ID,
    not the token.

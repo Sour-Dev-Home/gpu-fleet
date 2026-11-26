@@ -249,6 +249,30 @@ notification does (the budget's topic subscription shows deliveries in the conso
 internal-only service in the same project is documented as allowed but UNVERIFIED here. If the push is refused,
 revert `ingress` to `INGRESS_TRAFFIC_ALL` (the invoker binding is still the gate).
 
+### Flood alert (Q93)
+
+The same switch also acts on the broker's 4xx alert: more than 5 client errors per second for 5 minutes (a
+sustained flood; a worker with a wrong token polls about once a second and does not reach it). Cloud Monitoring
+publishes the incident through a Pub/Sub notification channel to the topic `fleet-flood`; its own push
+subscription (same pusher account and OIDC) calls the kill switch's `/alert` path. The switch acts only on
+`incident.state == "open"` of the policy named in `FLEET_FLOOD_POLICY` (the alert policy's display name, set by
+Terraform); anything else is logged and acknowledged. The budget path (`/`) and the alert path never accept each
+other's payloads. Reset is the same as above: fix the cause, then `tf apply`.
+
+UNVERIFIED until the first apply: the Monitoring service agent name
+(`service-<project number>@gcp-sa-monitoring-notification.iam.gserviceaccount.com`, from Google's notification-channel
+docs). If the channel refuses to create, check that page.
+
+**Drill** (cuts public access, like the budget drill; a fake message, not a real incident):
+
+```powershell
+$msg = '{"version":"1.2","incident":{"state":"open","policy_name":"fleet-broker: 4xx request rate"}}'
+gcloud pubsub topics publish fleet-flood --message=$msg
+# wait up to a minute: curl.exe -i "$url/nope" answers 403; the logs say "flood alert: public access removed"
+# the same with "state":"closed" or another policy_name: logged and ignored, the broker stays reachable
+tf plan; tf apply              # restores the public binding
+```
+
 ## S3 mode (ADR 0025)
 
 The broker leases presigned S3 URLs and signs them with AWS credentials from workload identity federation

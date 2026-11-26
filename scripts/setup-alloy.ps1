@@ -16,7 +16,8 @@ It then
   2. sets the Alloy service's environment (HKLM\SOFTWARE\GrafanaLabs\Alloy, value Environment): the URL, the
      instance ID, the token FILE's path and the worker's install ID,
   3. copies the repo's config to %ProgramData%\fleet\alloy\config.alloy (the service runs as SYSTEM, so it must not
-     run a user-writable file), keeps the service's other arguments (the storage path) and points `run` at the copy,
+     run a user-writable file), keeps the service's other arguments, points `run` at the copy and pins
+     `--storage.path` to %ProgramData%\fleet\alloy\data (same owner and ACL: SYSTEM and Administrators only),
   4. restarts the service.
 The registry holds an identifier of the account (instance ID) and the endpoint, not the token.
 #>
@@ -56,6 +57,9 @@ $dir = Join-Path $parent 'alloy'
 New-Item -ItemType Directory -Force $dir | Out-Null
 $tokenFile = Join-Path $dir 'grafana-token'
 $configCopy = Join-Path $dir 'config.alloy'
+# The service's storage (WAL of unsent metrics, component state). Alloy's default is under
+# %ProgramData%\GrafanaLabs, where a user could read or replace it; --storage.path pins it here, locked below.
+$dataDir = Join-Path $dir 'data'
 # A symlink or junction planted where we write would redirect the token (or the ACL change) elsewhere.
 function Assert-NotReparsePoint([string]$Path) {
   if (Test-Path -LiteralPath $Path) {
@@ -73,9 +77,13 @@ Assert-NotReparsePoint $dir
 if (Test-Path -LiteralPath $tokenFile) { Assert-NotReparsePoint $tokenFile; Remove-Item -LiteralPath $tokenFile -Force }
 New-Item -ItemType File $tokenFile | Out-Null
 Assert-NotReparsePoint $configCopy
+# Kept across runs (it holds the unsent-metrics buffer): created if missing, never deleted and recreated.
+Assert-NotReparsePoint $dataDir
+New-Item -ItemType Directory -Force $dataDir | Out-Null
+Assert-NotReparsePoint $dataDir
 $system = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
 $admins = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
-foreach ($path in @($parent, $dir, $tokenFile)) {
+foreach ($path in @($parent, $dir, $dataDir, $tokenFile)) {
   $acl = Get-Acl $path
   $acl.SetOwner($admins)                        # a pre-planted object may be owned by a user, who could undo the ACL
   $acl.SetAccessRuleProtection($true, $false)   # inheritance off, inherited rules dropped
@@ -104,9 +112,9 @@ $environment = @(
   "FLEET_INSTALL_ID=$InstallId"
 )
 $current = Get-ItemProperty -Path $key
-# Keep every existing flag (--storage.path and friends); replace only the config file.
-$flagsKept = @($current.Arguments | Where-Object { $_ -like '--*' })
-$arguments = @('run', $configCopy) + $flagsKept
+# Keep every existing flag except the storage path, which is pinned to the locked directory; replace the config.
+$flagsKept = @($current.Arguments | Where-Object { $_ -like '--*' -and $_ -notlike '--storage.path*' })
+$arguments = @('run', $configCopy) + $flagsKept + @("--storage.path=$dataDir")
 Set-ItemProperty -Path $key -Name Environment -Value $environment -Type MultiString
 Set-ItemProperty -Path $key -Name Arguments -Value $arguments -Type MultiString
 
