@@ -44,9 +44,12 @@ Out of scope everywhere: an attacker on the maintainer's own PC (they would alre
 - [x] Token rotation: each role accepts a `*_PREVIOUS` token during a rollover; steps in docs/secrets.md.
 - [ ] HTTPS only, through Cloud Run's managed TLS. No plain-HTTP listener is exposed.
 - [ ] Replace SQLite with a networked store (ADR 0005), then re-check its access control.
+      The store part is done (PostgreSQL, ADR 0020: local Compose and CI; the database has no published
+      port, and its URL and password are never logged). Stays open until step 4 puts Cloud SQL behind
+      Cloud Run and re-checks who can reach it (private IP or connector, IAM, backups).
 - [x] Store `sha256(lease_token)` instead of the token, so a read of the store can't take over leases.
-      Plain SHA-256: tokens are 128 random bits, so there's nothing to brute-force. Rows from before the
-      change are hashed in place on startup.
+      Plain SHA-256: tokens are 128 random bits, so there's nothing to brute-force. (Rows from before the
+      change were hashed in place on startup, until the PostgreSQL store, which has no old data.)
 - Accepted until phase 10: workers share one token, so one token holder (a buggy worker of the
   maintainer's, or a leaked token) can use up the shared poll bucket and slow the others. Heartbeats have
   their own bucket, so a `/lease` hot loop can't cost running jobs their leases; results are

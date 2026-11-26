@@ -30,6 +30,8 @@ ADR 0003 also warns that changing the key scheme makes every cached result look 
   edit early in the story invalidates every later pass 2 result. That's correct, and pass 2 is text-only and cheap.
 - Older workers ignore the new field and would store a pass 2 result under the wrong key. Upgrade workers before
   queueing pass 2 jobs. All workers belong to the maintainer until phase 10.
+- How migrations run now (PostgreSQL, advisory lock, add-only DDL; a Cloud Run Job once a backfill is needed):
+  [0020](0020-postgres-job-store.md).
 - `MIGRATIONS` is enough for one SQLite file. The networked store in phase 4 will need a real migration tool
   (for example Alembic), which will get its own ADR.
 

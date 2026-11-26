@@ -53,3 +53,28 @@ only as a search-result excerpt because the page fetch was truncated. Re-check t
 - Queries inside Firestore transactions; whether the free quota covers only the default database.
 - DynamoDB conditional writes; its 25 GB free storage on Free-plan accounts.
 - Whether a collector sidecar's own batching also stalls under request-based billing.
+
+## Console check (maintainer, step 3, 2026-11-25)
+Read from the Cloud SQL create form (Enterprise, PostgreSQL 18, us-central1, single zone; not created):
+- Shared core, 1 vCPU, 0.614 GB (`db-f1-micro`): $0.01/hour, about $7.30/month; 10 GB storage about
+  $1.70/month. About $9/month in all, which confirms the third-party estimate above. Chosen for step 4.
+- Shared core, 1 vCPU, 1.7 GB (`db-g1-small`): $0.04/hour, about $29/month.
+- The console now defaults to PostgreSQL 18, so local, CI and Cloud SQL all use 18 (ADR 0020).
+- The billing budget applies to all projects. Budgets alert; they don't cap spending.
+
+## Step 4 research (2026-11-25)
+| Topic | Finding | Source | Notes |
+|---|---|---|---|
+| max_connections default | by memory: "tiny (~0.5) 25", "small (~1.7) 50" | https://docs.cloud.google.com/sql/docs/postgres/flags | f1-micro = 25 is inferred from its 0.6 GB (UNVERIFIED mapping). A flag; changing it restarts the instance. |
+| IAM database auth | flag `cloudsql.iam_authentication` = `on`; roles `roles/cloudsql.instanceUser` (login) and `roles/cloudsql.client` (connect) | https://docs.cloud.google.com/sql/docs/postgres/iam-logins | The IAM user is the service account email without `.gserviceaccount.com`, type `CLOUD_IAM_SERVICE_ACCOUNT`. It starts with no privileges: GRANT as `postgres`. |
+| Token lifetime | OAuth tokens "valid for only one hour"; connectors refresh them for pooled connections | https://docs.cloud.google.com/sql/docs/postgres/authentication | Automatic IAM auth needs a connector or the Auth Proxy. |
+| Auth Proxy | "the recommended method for connecting to a Cloud SQL instance" | https://docs.cloud.google.com/sql/docs/postgres/connect-auth-proxy | Built-in Cloud Run socket with IAM auth: UNVERIFIED. |
+| Python connector | drivers: pymysql, pg8000, psycopg, asyncpg, pytds | https://github.com/GoogleCloudPlatform/cloud-sql-python-connector | psycopg major version not stated: UNVERIFIED. |
+| 429 billing | 429 = "no available instance"; billing of these not stated | https://docs.cloud.google.com/run/docs/troubleshooting | UNVERIFIED; check the pricing page footnotes. |
+| Private IP | Direct VPC egress: no connector, a /26 subnet, scales to zero. A VPC connector keeps at least 2 always-on instances | https://docs.cloud.google.com/run/docs/configuring/vpc-direct-vpc ; https://docs.cloud.google.com/vpc/docs/serverless-vpc-access | Private IP also needs private services access; its cost not found. |
+| Stopping the instance | "suspends instance charges"; storage and IP charges continue | https://docs.cloud.google.com/sql/docs/postgres/start-stop-restart-instance | |
+| Terraform | google provider v8.12.0 (17 Nov); budgets import as `billingAccounts/{id}/budgets/{name}`; Cloud Run v2 `deletion_protection` defaults to true | https://github.com/hashicorp/terraform-provider-google/releases | Argument names from the provider docs on GitHub `main`. |
+
+Decided for step 4 (maintainer, 2026-11-25; goes into step 4's ADR): Q56, Cloud SQL login through the Cloud SQL
+Auth Proxy as a Cloud Run sidecar with `--auto-iam-authn`, no password. Still open: public IP with no authorized
+networks, or private IP.

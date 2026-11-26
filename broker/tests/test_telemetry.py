@@ -1,11 +1,19 @@
 """Broker metrics (ADR 0018), read back through the real SDK with an in-memory reader."""
 
+from contextlib import ExitStack
+
+from conftest import make_store
 from fastapi.testclient import TestClient
 from fleet_broker import telemetry
 from fleet_broker.app import create_app
 from fleet_broker.store import JobStore
 from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from opentelemetry.sdk.metrics.export import (
+    InMemoryMetricReader,
+    MetricExporter,
+    MetricExportResult,
+    PeriodicExportingMetricReader,
+)
 from tokens import ADMIN, WORKER
 
 NOW = 1_800_000_000.0
@@ -21,16 +29,22 @@ class Clock:
         return self.now
 
 
-def rig(tmp_path):
+def rig(db_url):
     """A broker app with OTel metrics read by an in-memory reader."""
     clock, reader = Clock(), InMemoryMetricReader()
-    db = tmp_path / "broker.db"
-    reader_store = JobStore(db)
+    reader_store = make_store(db_url)
     metrics = telemetry.OtelMetrics(
         MeterProvider(metric_readers=[reader]), lambda: (clock(), reader_store.stats(clock()))
     )
     app = create_app(
-        db, WORKER, ADMIN, {"open"}, ttl_seconds=60, clock=clock, metrics=metrics, busy_timeout=0.05
+        db_url,
+        WORKER,
+        ADMIN,
+        {"open"},
+        ttl_seconds=60,
+        clock=clock,
+        metrics=metrics,
+        pool_timeout=0.3,
     )
     return TestClient(app), clock, reader
 
@@ -67,8 +81,8 @@ def complete(client, leased):
     assert r.status_code == 204
 
 
-def test_queue_gauges_read_the_database(tmp_path):
-    client, clock, reader = rig(tmp_path)
+def test_queue_gauges_read_the_database(db_url):
+    client, clock, reader = rig(db_url)
     add(client, "a")
     clock.now += 100
     add(client, "b")
@@ -84,8 +98,8 @@ def test_queue_gauges_read_the_database(tmp_path):
     assert age.value == 20  # "b" has waited 20 s; the running "a" doesn't count
 
 
-def test_completion_counts_once_and_records_turnaround(tmp_path):
-    client, clock, reader = rig(tmp_path)
+def test_completion_counts_once_and_records_turnaround(db_url):
+    client, clock, reader = rig(db_url)
     add(client, "a")
     leased = lease(client)
     clock.now += 42
@@ -139,8 +153,8 @@ def test_the_slo_threshold_is_a_bucket_edge():
     assert 900 in telemetry.TURNAROUND_BUCKETS
 
 
-def test_a_lease_after_expiry_is_counted(tmp_path):
-    client, clock, reader = rig(tmp_path)
+def test_a_lease_after_expiry_is_counted(db_url):
+    client, clock, reader = rig(db_url)
     add(client, "a")
     lease(client)
     clock.now += 61  # the worker vanished; its lease ran out
@@ -149,31 +163,26 @@ def test_a_lease_after_expiry_is_counted(tmp_path):
     assert reissued.value == 1
 
 
-def test_busy_database_responses_are_counted(tmp_path):
-    import sqlite3
-
-    client, _, reader = rig(tmp_path)
-    holder = sqlite3.connect(tmp_path / "broker.db", isolation_level=None)
-    holder.execute("BEGIN EXCLUSIVE")  # another writer holds the lock
-    try:
+def test_busy_database_responses_are_counted(db_url):
+    client, _, reader = rig(db_url)
+    with ExitStack() as held:  # every pooled connection is in use: the request times out (0.3 s)
+        for _ in range(client.app.state.pool.max_size):
+            held.enter_context(client.app.state.pool.connection())
         r = client.post(
             "/jobs", json={"job_id": "a", **JOB}, headers={"Authorization": f"Bearer {ADMIN}"}
         )
-    finally:
-        holder.execute("ROLLBACK")
-        holder.close()
     assert r.status_code == 503
     (busy,) = points(reader)["fleet.http.busy"]
     assert busy.value == 1
 
 
-def test_rate_limited_responses_are_counted(tmp_path):
+def test_rate_limited_responses_are_counted(db_url):
     clock, reader = Clock(), InMemoryMetricReader()
-    db = tmp_path / "broker.db"
+    reader_store = make_store(db_url)
     metrics = telemetry.OtelMetrics(
-        MeterProvider(metric_readers=[reader]), lambda: (clock(), JobStore(db).stats(clock()))
+        MeterProvider(metric_readers=[reader]), lambda: (clock(), reader_store.stats(clock()))
     )
-    app = create_app(db, WORKER, ADMIN, {"open"}, clock=clock, metrics=metrics, worker_burst=1)
+    app = create_app(db_url, WORKER, ADMIN, {"open"}, clock=clock, metrics=metrics, worker_burst=1)
     client = TestClient(app)
     assert [lease_status(client) for _ in range(3)] == [204, 429, 429]
     (limited,) = points(reader)["fleet.http.limited"]
@@ -185,7 +194,7 @@ def lease_status(client) -> int:
     return client.post("/lease", json=LEASE, headers=headers).status_code
 
 
-def test_broker_shutdown_flushes_metrics(tmp_path):
+def test_broker_shutdown_flushes_metrics_and_closes_the_pool(db_url):
     class Spy(telemetry.Metrics):
         stopped = False
 
@@ -193,24 +202,74 @@ def test_broker_shutdown_flushes_metrics(tmp_path):
             self.stopped = True
 
     spy = Spy()
-    app = create_app(tmp_path / "broker.db", WORKER, ADMIN, {"open"}, metrics=spy)
+    app = create_app(db_url, WORKER, ADMIN, {"open"}, metrics=spy)
     with TestClient(app):  # entering and leaving runs the app's startup and shutdown
         assert not spy.stopped
+        assert not app.state.pool.closed
     assert spy.stopped
+    assert app.state.pool.closed  # SIGTERM or not, the connections end cleanly
 
 
-def test_off_without_an_endpoint_or_when_disabled(tmp_path):
-    db = tmp_path / "broker.db"
-    assert type(telemetry.setup(db, Clock(), env={})) is telemetry.Metrics
+def test_off_without_an_endpoint_or_when_disabled(db_url):
+    store = make_store(db_url)
+    assert type(telemetry.setup(store, Clock(), env={})) is telemetry.Metrics
     disabled = {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4318", "OTEL_SDK_DISABLED": "true"}
-    assert type(telemetry.setup(db, Clock(), env=disabled)) is telemetry.Metrics
+    assert type(telemetry.setup(store, Clock(), env=disabled)) is telemetry.Metrics
 
 
-def test_on_with_an_endpoint(tmp_path):
+def test_on_with_an_endpoint(db_url):
     env = {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:9/"}
-    m = telemetry.setup(tmp_path / "broker.db", Clock(), env=env)
+    m = telemetry.setup(make_store(db_url), Clock(), env=env)
     try:
         assert isinstance(m, telemetry.OtelMetrics)
         assert telemetry.metrics_endpoint(env) == "http://127.0.0.1:9/v1/metrics"
     finally:
         m.provider.shutdown(timeout_millis=1)  # nothing listens on port 9: don't wait on it
+
+
+class Collect(MetricExporter):
+    """Keeps what the reader exports, so a test can read the final export."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.exported = []
+
+    def export(self, metrics_data, timeout_millis=10_000, **kwargs):
+        self.exported.append(metrics_data)
+        return MetricExportResult.SUCCESS
+
+    def force_flush(self, timeout_millis=10_000):
+        return True
+
+    def shutdown(self, timeout_millis=30_000, **kwargs):
+        pass
+
+
+def test_the_last_export_on_shutdown_still_reads_the_gauges(db_url):
+    # SIGTERM: the final collection calls the gauge callbacks, which query the database through
+    # the app's pool. The pool must close AFTER the metrics shut down, or the last window is lost.
+    exporter, errors, holder = Collect(), [], {}
+
+    def stats():
+        try:
+            return NOW, JobStore(holder["app"].state.pool, migrate=False).stats(NOW)
+        except Exception as e:
+            errors.append(e)
+            raise
+
+    reader = PeriodicExportingMetricReader(exporter, export_interval_millis=3_600_000)
+    metrics = telemetry.OtelMetrics(MeterProvider(metric_readers=[reader]), stats)
+    holder["app"] = create_app(db_url, WORKER, ADMIN, {"open"}, metrics=metrics)
+    with TestClient(holder["app"]) as client:
+        add(client, "a")
+    assert errors == []
+    final = [
+        point
+        for data in exporter.exported
+        for rm in data.resource_metrics
+        for sm in rm.scope_metrics
+        for m in sm.metrics
+        if m.name == "fleet.jobs"
+        for point in m.data.data_points
+    ]
+    assert sum(p.value for p in final) == 1  # the queued job, read from the database

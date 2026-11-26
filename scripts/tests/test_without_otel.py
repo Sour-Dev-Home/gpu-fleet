@@ -46,7 +46,11 @@ assert importlib.util.find_spec("opentelemetry.sdk") is None, "this check needs 
 from fleet_broker import telemetry
 from fleet_broker.app import create_app
 env = {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4318"}
-assert type(telemetry.setup("x.db", lambda: 0.0, env=env)) is telemetry.Metrics
+from fleet_broker.store import JobStore
+from psycopg_pool import ConnectionPool
+# a closed pool, never connected: without the SDK the gauges (the only reader) are never built
+store = JobStore(ConnectionPool("dbname=x", min_size=0, max_size=1, open=False), migrate=False)
+assert type(telemetry.setup(store, lambda: 0.0, env=env)) is telemetry.Metrics
 assert telemetry.export_logs(env)() is None
 print("ok")
 """

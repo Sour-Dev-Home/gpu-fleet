@@ -56,10 +56,10 @@ def separate_process(app):
     return asgi
 
 
-def fleet(tmp_path):
+def fleet(db_url):
     broker_spans = InMemorySpanExporter()
     app = create_app(
-        tmp_path / "broker.db",
+        db_url,
         WORKER,
         ADMIN,
         {"open"},
@@ -76,9 +76,9 @@ def fleet(tmp_path):
     return admin, worker, broker_spans
 
 
-def test_the_brokers_spans_nest_inside_the_workers_job_trace(tmp_path):
+def test_the_brokers_spans_nest_inside_the_workers_job_trace(db_url):
     WORKER_SPANS.clear()
-    admin, worker, broker_spans = fleet(tmp_path)
+    admin, worker, broker_spans = fleet(db_url)
     assert admin.post("/jobs", json={"job_id": "j1", **JOB}).status_code == 201
     assert worker.run_once() == "ran"
 
@@ -92,18 +92,18 @@ def test_the_brokers_spans_nest_inside_the_workers_job_trace(tmp_path):
     assert served.parent.span_id == mine["complete"].context.span_id
 
 
-def test_idle_polls_make_no_spans_on_either_side(tmp_path):
+def test_idle_polls_make_no_spans_on_either_side(db_url):
     WORKER_SPANS.clear()
-    _, worker, broker_spans = fleet(tmp_path)
+    _, worker, broker_spans = fleet(db_url)
     for _ in range(3):
         assert worker.run_once() is None
     assert WORKER_SPANS.get_finished_spans() == ()
     assert broker_spans.get_finished_spans() == ()
 
 
-def test_request_spans_keep_no_caller_ip_or_user_agent(tmp_path):
+def test_request_spans_keep_no_caller_ip_or_user_agent(db_url):
     WORKER_SPANS.clear()
-    admin, worker, broker_spans = fleet(tmp_path)
+    admin, worker, broker_spans = fleet(db_url)
     admin.post("/jobs", json={"job_id": "j1", **JOB})
     worker.run_once()
     (served,) = broker_spans.get_finished_spans()
@@ -114,9 +114,9 @@ def test_request_spans_keep_no_caller_ip_or_user_agent(tmp_path):
 SAMPLED = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
 
 
-def test_a_strangers_traceparent_records_nothing(tmp_path):
+def test_a_strangers_traceparent_records_nothing(db_url):
     # Without the worker token, a sampled traceparent must not make the broker export spans.
-    _, _, broker_spans = fleet(tmp_path)
+    _, _, broker_spans = fleet(db_url)
     app_client = TestClient(_last_app)
     for auth in ("", "Bearer not-the-token-0123456789abcdefghij", f"Bearer {ADMIN}"):
         headers = {"traceparent": SAMPLED} | ({"Authorization": auth} if auth else {})
@@ -124,8 +124,8 @@ def test_a_strangers_traceparent_records_nothing(tmp_path):
     assert broker_spans.get_finished_spans() == ()
 
 
-def test_a_workers_traceparent_is_honoured(tmp_path):
-    _, _, broker_spans = fleet(tmp_path)
+def test_a_workers_traceparent_is_honoured(db_url):
+    _, _, broker_spans = fleet(db_url)
     headers = {"traceparent": SAMPLED, "Authorization": f"Bearer {WORKER}"}
     TestClient(_last_app).post(
         "/lease", json={"capabilities": ["v1"], "models": ["m"]}, headers=headers
@@ -134,7 +134,7 @@ def test_a_workers_traceparent_is_honoured(tmp_path):
     assert f"{served.context.trace_id:032x}" == SAMPLED.split("-")[1]
 
 
-def test_a_500s_exception_leaves_without_message_or_stack_trace(tmp_path):
+def test_a_500s_exception_leaves_without_message_or_stack_trace(db_url):
     from opentelemetry.sdk.trace import Event
     from opentelemetry.sdk.trace import ReadableSpan as R
 
@@ -166,16 +166,16 @@ def test_plain_http_export_is_refused_off_this_machine():
         ok({"OTEL_EXPORTER_OTLP_ENDPOINT": "http://lgtm:4318"})
 
 
-def test_header_capture_is_refused(tmp_path):
-    app = create_app(tmp_path / "broker.db", WORKER, ADMIN, {"open"})
+def test_header_capture_is_refused(db_url):
+    app = create_app(db_url, WORKER, ADMIN, {"open"})
     env = {"OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SERVER_REQUEST": ".*"}
     with pytest.raises(ValueError, match="bearer token"):
         telemetry.trace_app(app, env, exporter=InMemorySpanExporter(), worker_tokens=(WORKER,))
 
 
-def test_request_spans_record_no_headers(tmp_path):
+def test_request_spans_record_no_headers(db_url):
     WORKER_SPANS.clear()
-    admin, worker, broker_spans = fleet(tmp_path)
+    admin, worker, broker_spans = fleet(db_url)
     admin.post("/jobs", json={"job_id": "j1", **JOB})
     worker.run_once()
     for s in broker_spans.get_finished_spans():

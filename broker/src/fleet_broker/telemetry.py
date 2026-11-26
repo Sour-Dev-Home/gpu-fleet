@@ -16,7 +16,6 @@ import logging
 import os
 import uuid
 from collections.abc import Callable, Collection, Iterable, Mapping
-from pathlib import Path
 
 from . import jsonlog
 from .store import Claim, Completion, JobStore, QueueStats
@@ -330,9 +329,10 @@ def metrics_endpoint(env: Mapping[str, str]) -> str:
 
 
 def setup(
-    db_path: str | Path, clock: Callable[[], float], env: Mapping[str, str] = os.environ
+    reader_store: JobStore, clock: Callable[[], float], env: Mapping[str, str] = os.environ
 ) -> Metrics:
-    """OTLP metrics if configured, else the no-op."""
+    """OTLP metrics if configured, else the no-op. `reader_store` serves the queue gauges from
+    the app's pool (a connection only while a query runs)."""
     if env.get("OTEL_SDK_DISABLED", "").strip().lower() == "true":
         return Metrics()
     if not env.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
@@ -346,8 +346,6 @@ def setup(
         log.warning("OTEL_EXPORTER_OTLP_ENDPOINT is set but the [otel] extra isn't installed")
         return Metrics()
 
-    # One connection for the exporter's thread, separate from the request connections.
-    reader_store = JobStore(db_path)
     # Every instance reports the same database-wide gauges: the instance ID keeps their series
     # apart, and dashboards take the max across instances rather than the sum.
     resource = Resource.create(

@@ -1,12 +1,11 @@
 """ADR 0015: a job is leased only to a worker whose clearance covers its data class and whose
 declared capabilities (prompt versions, models) include the job's. All in the one claim statement."""
 
-import sqlite3
-
+import psycopg
 import pytest
+from conftest import make_store
 from fastapi.testclient import TestClient
 from fleet_broker.app import _from_env, create_app
-from fleet_broker.store import JobStore
 from tokens import ADMIN, WORKER
 
 NOW = 1_800_000_000.0
@@ -19,9 +18,9 @@ def claim(store, clearance=ALL, capabilities=PV, models=MODELS):
     return store.claim(NOW, 60, clearance, capabilities, models)
 
 
-def make(tmp_path, **jobs):
+def make(db_url, **jobs):
     """jobs: job_id -> (data_class, prompt_version, model)."""
-    store = JobStore(tmp_path / "broker.db")
+    store = make_store(db_url)
     for job_id, (data_class, pv, model) in jobs.items():
         store.add(job_id, "a" * 64, model, pv, data_class=data_class)
     return store
@@ -30,25 +29,25 @@ def make(tmp_path, **jobs):
 # --- schema ---
 
 
-def test_old_database_gets_a_nullable_data_class_column(tmp_path):
-    path = tmp_path / "old.db"
-    db = sqlite3.connect(path)
-    db.execute(
-        "CREATE TABLE jobs (job_id TEXT PRIMARY KEY, input_sha256 TEXT NOT NULL, model TEXT NOT NULL,"
-        " prompt_version TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', attempts INTEGER NOT NULL"
-        " DEFAULT 0, lease_token TEXT, lease_expires_at REAL, result_key TEXT, context_sha256 TEXT)"
-    )
-    db.execute(
-        "INSERT INTO jobs (job_id, input_sha256, model, prompt_version) VALUES ('o','a','m','v1')"
-    )
-    db.commit()
-    db.close()
-    store = JobStore(path)
+def test_old_database_gets_a_nullable_data_class_column(db_url):
+    with psycopg.connect(db_url, autocommit=True) as db:
+        db.execute(
+            "CREATE TABLE jobs (seq BIGINT GENERATED ALWAYS AS IDENTITY, job_id TEXT PRIMARY KEY,"
+            " input_sha256 TEXT NOT NULL, model TEXT NOT NULL, prompt_version TEXT NOT NULL,"
+            " state TEXT NOT NULL DEFAULT 'queued', attempts INTEGER NOT NULL DEFAULT 0,"
+            " lease_token TEXT, lease_expires_at DOUBLE PRECISION, result_key TEXT,"
+            " context_sha256 TEXT)"
+        )
+        db.execute(
+            "INSERT INTO jobs (job_id, input_sha256, model, prompt_version)"
+            " VALUES ('o','a','m','v1')"
+        )
+    store = make_store(db_url)
     assert store.get("o")["data_class"] is None
 
 
-def test_null_data_class_is_footage(tmp_path):
-    store = make(tmp_path, j=(None, "v1", "m"))
+def test_null_data_class_is_footage(db_url):
+    store = make(db_url, j=(None, "v1", "m"))
     assert claim(store, clearance=frozenset({"open", "derived"})) is None
     assert claim(store, clearance=frozenset({"footage"})).job_id == "j"
 
@@ -56,50 +55,50 @@ def test_null_data_class_is_footage(tmp_path):
 # --- the three conditions ---
 
 
-def test_security_open_clearance_never_leases_footage_or_null(tmp_path):
-    store = make(tmp_path, f=("footage", "v1", "m"), n=(None, "v1", "m"), d=("derived", "v1", "m"))
+def test_security_open_clearance_never_leases_footage_or_null(db_url):
+    store = make(db_url, f=("footage", "v1", "m"), n=(None, "v1", "m"), d=("derived", "v1", "m"))
     assert claim(store, clearance=frozenset({"open"})) is None
     for job_id in "fnd":
         assert store.get(job_id)["state"] == "queued"
         assert store.get(job_id)["attempts"] == 0
 
 
-def test_clearance_picks_only_matching_class_even_behind_other_jobs(tmp_path):
-    store = make(tmp_path, f=("footage", "v1", "m"), o=("open", "v1", "m"))
+def test_clearance_picks_only_matching_class_even_behind_other_jobs(db_url):
+    store = make(db_url, f=("footage", "v1", "m"), o=("open", "v1", "m"))
     assert claim(store, clearance=frozenset({"open"})).job_id == "o"
     assert claim(store, clearance=frozenset({"open"})) is None
     assert store.get("f")["state"] == "queued"
 
 
-def test_prompt_version_must_be_declared(tmp_path):
-    store = make(tmp_path, j=("open", "smoke-v1", "m"))
+def test_prompt_version_must_be_declared(db_url):
+    store = make(db_url, j=("open", "smoke-v1", "m"))
     assert claim(store, capabilities=frozenset({"echo-v1"})) is None
     assert claim(store, capabilities=frozenset({"echo-v1", "smoke-v1"})).job_id == "j"
 
 
-def test_model_must_be_declared(tmp_path):
-    store = make(tmp_path, j=("open", "v1", "qwen3:8b"))
+def test_model_must_be_declared(db_url):
+    store = make(db_url, j=("open", "v1", "qwen3:8b"))
     assert claim(store, models=frozenset({"echo"})) is None
     assert claim(store, models=frozenset({"echo", "qwen3:8b"})).job_id == "j"
 
 
-def test_a_job_nobody_can_run_stays_queued_and_never_dead_letters(tmp_path):
-    store = make(tmp_path, j=("footage", "v1", "m"))
+def test_a_job_nobody_can_run_stays_queued_and_never_dead_letters(db_url):
+    store = make(db_url, j=("footage", "v1", "m"))
     for i in range(10):  # more tries than max_attempts
         assert claim(store, clearance=frozenset({"open"})) is None
     row = store.get("j")
     assert (row["state"], row["attempts"]) == ("queued", 0)
 
 
-def test_empty_sets_lease_nothing(tmp_path):
-    store = make(tmp_path, j=("open", "v1", "m"))
+def test_empty_sets_lease_nothing(db_url):
+    store = make(db_url, j=("open", "v1", "m"))
     assert claim(store, clearance=frozenset()) is None
     assert claim(store, capabilities=frozenset()) is None
     assert claim(store, models=frozenset()) is None
 
 
-def test_values_are_parameters_not_sql(tmp_path):
-    store = make(tmp_path, j=("open", "v1", "m"))
+def test_values_are_parameters_not_sql(db_url):
+    store = make(db_url, j=("open", "v1", "m"))
     assert claim(store, capabilities=frozenset({"x') OR 1=1 --"})) is None
 
 
@@ -115,24 +114,22 @@ JOB = {
 CAPS = {"capabilities": ["v1"], "models": ["m"]}
 
 
-def client(tmp_path, token, clearance=ALL):
-    app = create_app(tmp_path / "broker.db", WORKER, ADMIN, clearance=clearance)
+def client(db_url, token, clearance=ALL):
+    app = create_app(db_url, WORKER, ADMIN, clearance=clearance)
     return TestClient(app, headers={"Authorization": f"Bearer {token}"})
 
 
 @pytest.mark.parametrize("value", [None, "secret", "", "OPEN", 1])
-def test_post_jobs_rejects_missing_or_unknown_data_class(tmp_path, value):
+def test_post_jobs_rejects_missing_or_unknown_data_class(db_url, value):
     job = {k: v for k, v in JOB.items() if k != "data_class"}
     if value is not None:
         job["data_class"] = value
-    assert client(tmp_path, ADMIN).post("/jobs", json=job).status_code == 422
+    assert client(db_url, ADMIN).post("/jobs", json=job).status_code == 422
 
 
 @pytest.mark.parametrize("value", ["footage", "derived", "open"])
-def test_post_jobs_accepts_each_data_class(tmp_path, value):
-    assert (
-        client(tmp_path, ADMIN).post("/jobs", json=JOB | {"data_class": value}).status_code == 201
-    )
+def test_post_jobs_accepts_each_data_class(db_url, value):
+    assert client(db_url, ADMIN).post("/jobs", json=JOB | {"data_class": value}).status_code == 201
 
 
 @pytest.mark.parametrize(
@@ -151,24 +148,24 @@ def test_post_jobs_accepts_each_data_class(tmp_path, value):
         {"capabilities": ["v1"], "models": ["m"], "clearance": ["footage"]},
     ],
 )
-def test_lease_requires_valid_capabilities(tmp_path, body):
-    c = client(tmp_path, WORKER)
+def test_lease_requires_valid_capabilities(db_url, body):
+    c = client(db_url, WORKER)
     assert c.post("/lease", json=body).status_code == 422
 
 
-def test_lease_with_open_clearance_skips_footage_over_http(tmp_path):
-    admin = client(tmp_path, ADMIN)
+def test_lease_with_open_clearance_skips_footage_over_http(db_url):
+    admin = client(db_url, ADMIN)
     admin.post("/jobs", json=JOB | {"job_id": "f", "data_class": "footage"})
     admin.post("/jobs", json=JOB | {"job_id": "o"})
-    worker = client(tmp_path, WORKER, clearance=frozenset({"open"}))
+    worker = client(db_url, WORKER, clearance=frozenset({"open"}))
     assert worker.post("/lease", json=CAPS).json()["job_id"] == "o"
     assert worker.post("/lease", json=CAPS).status_code == 204
 
 
-def test_lease_skips_jobs_for_other_capabilities_over_http(tmp_path):
-    admin = client(tmp_path, ADMIN)
+def test_lease_skips_jobs_for_other_capabilities_over_http(db_url):
+    admin = client(db_url, ADMIN)
     admin.post("/jobs", json=JOB | {"prompt_version": "smoke-v1"})
-    worker = client(tmp_path, WORKER)
+    worker = client(db_url, WORKER)
     assert worker.post("/lease", json=CAPS).status_code == 204
     assert (
         worker.post("/lease", json={"capabilities": ["smoke-v1"], "models": ["m"]}).status_code
@@ -182,46 +179,73 @@ def test_lease_skips_jobs_for_other_capabilities_over_http(tmp_path):
 @pytest.mark.parametrize(
     "clearance", [frozenset(), frozenset({"secret"}), frozenset({"open", "x"})]
 )
-def test_create_app_rejects_empty_or_unknown_clearance(tmp_path, clearance):
+def test_create_app_rejects_empty_or_unknown_clearance(db_url, clearance):
     with pytest.raises(ValueError, match="clearance"):
-        create_app(tmp_path / "broker.db", WORKER, ADMIN, clearance=clearance)
+        create_app(db_url, WORKER, ADMIN, clearance=clearance)
 
 
-def test_clearance_is_required(tmp_path):
+def test_clearance_is_required(db_url):
     with pytest.raises(TypeError):
-        create_app(tmp_path / "broker.db", WORKER, ADMIN)
+        create_app(db_url, WORKER, ADMIN)
 
 
-def env(monkeypatch, tmp_path, clearance):
+def env(monkeypatch, db_url, clearance):
     monkeypatch.setenv("FLEET_WORKER_TOKEN", WORKER)
     monkeypatch.setenv("FLEET_ADMIN_TOKEN", ADMIN)
-    monkeypatch.setenv("FLEET_DB", str(tmp_path / "e.db"))
+    monkeypatch.setenv("FLEET_DATABASE_URL", db_url)
     monkeypatch.delenv("FLEET_WORKER_CLEARANCE", raising=False)
     if clearance is not None:
         monkeypatch.setenv("FLEET_WORKER_CLEARANCE", clearance)
 
 
 @pytest.mark.parametrize("value", [None, "", " , ", "footage,secret", "Open"])
-def test_from_env_requires_a_valid_clearance(monkeypatch, tmp_path, value):
-    env(monkeypatch, tmp_path, value)
+def test_from_env_requires_a_valid_clearance(monkeypatch, db_url, value):
+    env(monkeypatch, db_url, value)
     with pytest.raises(ValueError, match="FLEET_WORKER_CLEARANCE"):
         _from_env()
 
 
-def test_a_real_broker_writes_no_access_log(monkeypatch, tmp_path):
+def test_from_env_refuses_to_start_without_a_database_url(monkeypatch, db_url):
+    # Required like the tokens, never defaulted: a forgotten setting must stop the broker.
+    env(monkeypatch, db_url, "open")
+    monkeypatch.delenv("FLEET_DATABASE_URL")
+    with pytest.raises(ValueError, match="FLEET_DATABASE_URL"):
+        _from_env()
+    monkeypatch.setenv("FLEET_DATABASE_URL", "")
+    with pytest.raises(ValueError, match="FLEET_DATABASE_URL"):
+        _from_env()
+
+
+@pytest.mark.parametrize("which", ["weak worker token", "bad rate", "bad clearance"])
+def test_a_refused_config_leaves_no_pool_open(monkeypatch, db_url, which):
+    import conftest
+
+    env(monkeypatch, db_url, "open")
+    if which == "weak worker token":
+        monkeypatch.setenv("FLEET_WORKER_TOKEN", "short")
+    elif which == "bad rate":
+        monkeypatch.setenv("FLEET_WORKER_RATE", "0")
+    else:
+        monkeypatch.setenv("FLEET_WORKER_CLEARANCE", "secret")
+    with pytest.raises(ValueError):
+        _from_env()
+    assert all(pool.closed for pool in conftest._POOLS)
+
+
+def test_a_real_broker_writes_no_access_log(monkeypatch, db_url):
     # One line per request with the caller's IP: personal data for every volunteer (ADR 0018).
     import logging
 
     access = logging.getLogger("uvicorn.access")
     monkeypatch.setattr(access, "disabled", False)  # restored after the test
-    env(monkeypatch, tmp_path, "open")
+    env(monkeypatch, db_url, "open")
     _from_env()
     assert access.disabled
 
 
-def test_from_env_accepts_the_previous_tokens_during_a_rotation(monkeypatch, tmp_path):
+def test_from_env_accepts_the_previous_tokens_during_a_rotation(monkeypatch, db_url):
     old_worker, old_admin = "old-worker-" + "w" * 32, "old-admin-" + "a" * 32
-    env(monkeypatch, tmp_path, "open")
+    env(monkeypatch, db_url, "open")
     monkeypatch.setenv("FLEET_WORKER_TOKEN_PREVIOUS", old_worker)
     monkeypatch.setenv("FLEET_ADMIN_TOKEN_PREVIOUS", old_admin)
     app = _from_env()
@@ -235,8 +259,8 @@ def test_from_env_accepts_the_previous_tokens_during_a_rotation(monkeypatch, tmp
     assert w.post("/lease", json=CAPS).status_code == 200
 
 
-def test_from_env_reads_the_rate_limit(monkeypatch, tmp_path):
-    env(monkeypatch, tmp_path, "open")
+def test_from_env_reads_the_rate_limit(monkeypatch, db_url):
+    env(monkeypatch, db_url, "open")
     monkeypatch.setenv("FLEET_WORKER_BURST", "1")
     w = TestClient(_from_env(), headers={"Authorization": f"Bearer {WORKER}"})
     assert [w.post("/lease", json=CAPS).status_code for _ in range(2)] == [204, 429]
@@ -245,8 +269,8 @@ def test_from_env_reads_the_rate_limit(monkeypatch, tmp_path):
         _from_env()
 
 
-def test_from_env_reads_the_clearance_list(monkeypatch, tmp_path):
-    env(monkeypatch, tmp_path, "derived, open")
+def test_from_env_reads_the_clearance_list(monkeypatch, db_url):
+    env(monkeypatch, db_url, "derived, open")
     c = TestClient(_from_env(), headers={"Authorization": f"Bearer {ADMIN}"})
     c.post("/jobs", json=JOB | {"data_class": "footage"})
     w = TestClient(_from_env(), headers={"Authorization": f"Bearer {WORKER}"})

@@ -8,9 +8,9 @@ from tokens import ADMIN, WORKER
 ALL = {"footage", "derived", "open"}
 
 
-def test_demo_jobs_pass_the_brokers_input_rules(tmp_path):
+def test_demo_jobs_pass_the_brokers_input_rules(db_url):
     # The real contract: every demo job is accepted by the real API (ADR 0011 field rules).
-    app = create_app(tmp_path / "broker.db", WORKER, ADMIN, ALL)
+    app = create_app(db_url, WORKER, ADMIN, ALL)
     admin = TestClient(app, headers={"Authorization": f"Bearer {ADMIN}"})
     for job in demo_jobs(5, "t"):
         assert admin.post("/jobs", json=job).status_code == 201

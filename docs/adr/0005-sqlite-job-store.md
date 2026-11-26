@@ -1,6 +1,6 @@
 # 0005. SQLite job store for the local phases; one-statement atomic claim
 
-**Status:** Accepted (maintainer's choice, 2026-11-25). To be revisited in phase 4.
+**Status:** Superseded by [0020](0020-postgres-job-store.md) (2026-11-25). Was: Accepted (maintainer's choice, 2026-11-25).
 **Date:** 2026-11-25
 
 ## Context
