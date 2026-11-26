@@ -52,7 +52,8 @@ the SDK's background exporter between requests.
 - The OTLP endpoint and instance ID reach the broker as Terraform-managed Secret Manager versions, not as plain env
   values: a sensitive value inside Cloud Run's env set would make every env entry (sensitive) in plans and the broker's
   env unreviewable. They are identifiers, so holding them in the private state is accepted; a test fails if any env
-  value uses a sensitive variable. Cost: two more secrets (versions are free at this scale).
+  value uses a sensitive variable. Cost: two more versions make 7 active versions (disabled ones count) against 6 free, about
+  $0.06 a month; accesses (about 6 per instance start) stay far below the 10k free.
 - UNVERIFIED until the first apply: Scheduler's OIDC to Cloud Run with the dedicated account, the custom audience
   being accepted by the broker's own verification, and Grafana's free-tier limits under this load.
 

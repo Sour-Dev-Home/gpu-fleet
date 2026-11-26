@@ -254,3 +254,10 @@ def test_the_grafana_identifiers_are_secret_versions_pinned_to_the_terraform_man
         assert f"google_secret_manager_secret.{name}[0].secret_id" in m.group(1)
         assert f"google_secret_manager_secret_version.{name}[0].version" in m.group(1)
         assert '"latest"' not in m.group(1)
+
+
+def test_identifier_versions_are_replaced_create_before_destroy():
+    # The running revision pins the current version; destroying it first would break a cold start (min 0).
+    for name in ("grafana_otlp_endpoint", "grafana_instance_id"):
+        body = res("google_secret_manager_secret_version", name)
+        assert re.search(r"lifecycle\s*\{[^}]*create_before_destroy\s*=\s*true", body), name

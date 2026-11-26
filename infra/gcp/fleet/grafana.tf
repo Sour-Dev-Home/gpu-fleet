@@ -66,6 +66,12 @@ resource "google_secret_manager_secret_version" "grafana_otlp_endpoint" {
 
   secret      = google_secret_manager_secret.grafana_otlp_endpoint[0].id
   secret_data = var.grafana_otlp_endpoint
+
+  # A changed value makes a new version: create it before destroying the old one, which the running revision
+  # still pins (min instances 0, so a cold start in between would fail).
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "google_secret_manager_secret_iam_member" "broker_reads_grafana_otlp_endpoint" {
@@ -93,6 +99,10 @@ resource "google_secret_manager_secret_version" "grafana_instance_id" {
 
   secret      = google_secret_manager_secret.grafana_instance_id[0].id
   secret_data = var.grafana_instance_id
+
+  lifecycle {
+    create_before_destroy = true # see grafana_otlp_endpoint
+  }
 }
 
 resource "google_secret_manager_secret_iam_member" "broker_reads_grafana_instance_id" {
