@@ -2,6 +2,9 @@
 
 The design choices behind the fleet, by theme. Each entry gives the question, the alternatives, the choice and the
 reason, with a link to the ADR that holds the detail. Numbers marked "napkin" are back-of-the-envelope estimates.
+Prices, quotas and free-tier limits not stated in the linked ADR come from the
+[phase research notes](research/phase-4.md) or the code's constants, checked on the date noted there; some vendor
+rates are still marked UNVERIFIED in those notes.
 
 ## How decisions are made here
 
@@ -127,7 +130,8 @@ checked by mutation testing.
 - **What happens to a job whose worker dies?** Chosen: lazy expiry (no reaper), an attempt counter, dead letters after
   `max_attempts`, and an idempotent complete. [0006](adr/0006-lease-lifecycle.md)
 - **How should a worker react to each failure?** Chosen: status codes encode the reaction (409 lost lease, 422
-  rejected result, 401 stop loudly, 5xx retry); invalid output is never stored. [0007](adr/0007-http-contract-and-auth.md),
+  rejected result, 401 stop loudly, 5xx retry); invalid output is never stored. [0007](adr/0007-http-contract-and-auth.md)
+  (its auth was accepted for local use, then hardened for the public broker in 0011 and 0028),
   [0010](adr/0010-worker-failure-handling.md)
 - **Where does the broker run, and how does it log in to its database?** Chosen: Cloud Run with a Cloud SQL Auth Proxy
   sidecar and IAM login, no password (Q56). Kubernetes is a backend, not the control layer.
