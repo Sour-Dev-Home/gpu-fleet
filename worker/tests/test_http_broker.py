@@ -60,6 +60,21 @@ def test_heartbeat_409_is_lease_lost():
         b.heartbeat(a_lease(received_at=1000.0))
 
 
+@pytest.mark.parametrize("status", [429, 503])
+def test_rate_limited_or_busy_is_retried_later(status):
+    # 429: the broker's per-token rate limit (docs/security.md); 503: a busy database (ADR 0016).
+    # Both mean "back off and try again", never "give up on the job".
+    from fleet_worker.loop import TransientError
+
+    clock = FakeClock()
+    responses = {p: httpx.Response(status) for p in ("/lease", "/heartbeat", "/complete")}
+    b = broker(responses, clock)
+    with pytest.raises(TransientError):
+        b.lease()
+    with pytest.raises(TransientError):
+        b.heartbeat(a_lease(received_at=1000.0))
+
+
 def test_other_errors_are_not_mistaken_for_lease_lost():
     clock = FakeClock()
     b = broker({"/heartbeat": httpx.Response(401)}, clock)

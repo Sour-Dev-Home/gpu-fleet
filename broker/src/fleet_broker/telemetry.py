@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from pathlib import Path
 
 from . import jsonlog
@@ -43,6 +43,9 @@ class Metrics:
         pass
 
     def busy(self) -> None:
+        pass
+
+    def limited(self) -> None:
         pass
 
     def shutdown(self) -> None:
@@ -96,6 +99,9 @@ class OtelMetrics(Metrics):
         self._busy = meter.create_counter(
             "fleet.http.busy", unit="{response}", description="503s for a busy database"
         )
+        self._limited = meter.create_counter(
+            "fleet.http.limited", unit="{response}", description="429s from the worker rate limit"
+        )
 
     def leased(self, claim: Claim) -> None:
         if claim.attempts > 1:  # leased before, never completed: that lease ran out
@@ -115,6 +121,9 @@ class OtelMetrics(Metrics):
 
     def busy(self) -> None:
         self._busy.add(1)
+
+    def limited(self) -> None:
+        self._limited.add(1)
 
     def shutdown(self) -> None:
         # Export what's left: Cloud Run stops instances often, and the last window would be lost.
@@ -167,23 +176,21 @@ def check_endpoint(env: Mapping[str, str]) -> str:
     )
 
 
-def _authenticated_propagator(worker_token: str):
-    """W3C trace context, honoured only on requests that carry the worker token.
+def _authenticated_propagator(worker_tokens: Collection[str]):
+    """W3C trace context, honoured only on requests that carry a worker token.
 
     Request spans start in middleware, before the route checks the token, so without this a
     stranger's `traceparent: ...-01` would make the broker record and export a span for every
     request: a cheap way to burn the telemetry budget and bury real traces."""
-    import hmac
-
     from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
-    expected = f"Bearer {worker_token}".encode()
+    from .auth import bearer_matches
 
     class WorkerOnly(TraceContextTextMapPropagator):
         def extract(self, carrier, context=None, getter=None):
             kwargs = {} if getter is None else {"getter": getter}
             values = (getter.get(carrier, "authorization") if getter else None) or [""]
-            if not hmac.compare_digest(values[0].encode(), expected):
+            if not bearer_matches(values[0], worker_tokens):
                 return context if context is not None else _empty_context()
             return super().extract(carrier, context, **kwargs)
 
@@ -242,7 +249,10 @@ def _scrubbing(exporter):
 
 
 def trace_app(
-    app, env: Mapping[str, str] = os.environ, exporter=None, worker_token: str = ""
+    app,
+    env: Mapping[str, str] = os.environ,
+    exporter=None,
+    worker_tokens: Collection[str] = (),
 ) -> Callable[[], None]:
     """Record request spans, but only inside a trace a worker started (ADR 0018).
 
@@ -258,8 +268,10 @@ def trace_app(
     for name in HEADER_CAPTURE_VARIABLES:
         if os.environ.get(name) or env.get(name):
             raise ValueError(f"{name} would record request headers (the bearer token): unset it")
-    if not worker_token:
-        raise ValueError("trace_app needs the worker token to tell workers' traces from strangers'")
+    if not worker_tokens or not all(worker_tokens):
+        raise ValueError(
+            "trace_app needs the worker tokens to tell workers' traces from strangers'"
+        )
     try:
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
         from opentelemetry.propagate import set_global_textmap
@@ -271,8 +283,8 @@ def trace_app(
         return lambda: None
 
     # The ASGI middleware extracts with the global propagator. It's process-wide: one broker app
-    # per process (a second trace_app call replaces the first's token). It also drops `baggage`.
-    set_global_textmap(_authenticated_propagator(worker_token))
+    # per process (a second trace_app call replaces the first's tokens). It also drops `baggage`.
+    set_global_textmap(_authenticated_propagator(tuple(worker_tokens)))
     provider = TracerProvider(
         sampler=ParentBased(root=ALWAYS_OFF),
         resource=Resource.create(

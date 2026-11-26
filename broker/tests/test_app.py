@@ -72,6 +72,81 @@ def test_weak_or_shared_tokens_are_refused_at_startup(tmp_path, worker_token, ad
         create_app(tmp_path / "broker.db", worker_token, admin_token, ALL)
 
 
+OLD_WORKER = "old-worker-token-0123456789abcdefghijk"
+OLD_ADMIN = "old-admin-token-0123456789abcdefghijkl"
+
+
+def test_during_a_rotation_the_previous_tokens_still_work(tmp_path):
+    # docs/secrets.md "Rotating broker tokens": workers move to the new token one at a time.
+    rot = {"previous_worker_token": OLD_WORKER, "previous_admin_token": OLD_ADMIN}
+    for token in (WORKER, OLD_WORKER):
+        assert as_(token, tmp_path, **rot).post("/lease", json=CAPS).status_code == 204
+    for token in (ADMIN, OLD_ADMIN):
+        assert as_(token, tmp_path, **rot).post("/jobs", json=JOB).status_code == 201
+    # Each role still accepts only its own tokens.
+    assert as_(OLD_ADMIN, tmp_path, **rot).post("/lease", json=CAPS).status_code == 401
+    assert as_(OLD_WORKER, tmp_path, **rot).post("/jobs", json=JOB).status_code == 401
+    # After the rotation (no previous token configured) the old one is refused.
+    assert as_(OLD_WORKER, tmp_path).post("/lease", json=CAPS).status_code == 401
+
+
+@pytest.mark.parametrize(
+    "rot",
+    [
+        {"previous_worker_token": "short"},
+        {"previous_admin_token": "short"},
+        {"previous_worker_token": ADMIN},  # an admin token must never pass as a worker token
+        {"previous_admin_token": WORKER},
+        {"previous_worker_token": OLD_WORKER, "previous_admin_token": OLD_WORKER},
+    ],
+)
+def test_previous_tokens_get_the_same_checks(tmp_path, rot):
+    with pytest.raises(ValueError):
+        create_app(tmp_path / "broker.db", WORKER, ADMIN, ALL, **rot)
+
+
+def test_worker_requests_are_rate_limited(tmp_path):
+    # docs/security.md, before phase 4: a leaked token or a hot-looping worker can't run up the
+    # Cloud Run bill or starve the thread pool. A token bucket: `burst` at once, then `rate`/s.
+    clock = Clock()
+    a = create_app(
+        tmp_path / "b.db", WORKER, ADMIN, ALL, clock=clock, worker_rate=1, worker_burst=2
+    )
+    w = TestClient(a, headers={"Authorization": f"Bearer {WORKER}"})
+    assert [w.post("/lease", json=CAPS).status_code for _ in range(2)] == [204, 204]
+    limited = w.post("/lease", json=CAPS)
+    assert limited.status_code == 429
+    assert limited.headers["Retry-After"] == "1"
+    clock.now += 1  # one token back
+    assert w.post("/lease", json=CAPS).status_code == 204
+    assert w.post("/lease", json=CAPS).status_code == 429
+
+
+def test_a_lease_hot_loop_cannot_cost_running_jobs_their_heartbeats(tmp_path):
+    # Heartbeats have their own bucket: polling as fast as possible empties only the poll bucket.
+    a = create_app(tmp_path / "b.db", WORKER, ADMIN, ALL, clock=Clock(), worker_burst=2)
+    w = TestClient(a, headers={"Authorization": f"Bearer {WORKER}"})
+    assert [w.post("/lease", json=CAPS).status_code for _ in range(3)] == [204, 204, 429]
+    beat = w.post("/heartbeat", json={"job_id": "j", "lease_token": "t"})
+    assert beat.status_code == 409  # judged on its merits (no such lease), not rate limited
+
+
+def test_strangers_cannot_use_up_the_workers_allowance(tmp_path):
+    # Authentication comes first: a wrong token gets 401 without touching the bucket.
+    a = create_app(tmp_path / "b.db", WORKER, ADMIN, ALL, clock=Clock(), worker_burst=2)
+    stranger = TestClient(a, headers={"Authorization": "Bearer " + "x" * 40})
+    assert {stranger.post("/lease", json=CAPS).status_code for _ in range(10)} == {401}
+    w = TestClient(a, headers={"Authorization": f"Bearer {WORKER}"})
+    assert w.post("/lease", json=CAPS).status_code == 204
+
+
+def test_the_admin_can_enqueue_in_bursts(tmp_path):
+    a = create_app(tmp_path / "b.db", WORKER, ADMIN, ALL, clock=Clock(), worker_burst=1)
+    admin = TestClient(a, headers={"Authorization": f"Bearer {ADMIN}"})
+    codes = {admin.post("/jobs", json=JOB | {"job_id": f"j{i}"}).status_code for i in range(5)}
+    assert codes == {201}
+
+
 # --- exposure and input limits ---
 
 
@@ -121,6 +196,32 @@ def test_result_key_must_be_a_sha256(worker):
 def test_oversized_body_is_413(tmp_path):
     big = JOB | {"model": "m" * 20_000}
     assert as_(ADMIN, tmp_path).post("/jobs", json=big).status_code == 413
+
+
+def test_an_oversized_chunked_body_is_413(tmp_path):
+    # No Content-Length (chunked transfer): the size is only known while reading. Without a cap,
+    # one request could make the broker buffer up to Cloud Run's 32 MiB.
+    def chunks():
+        for _ in range(20):
+            yield b"x" * 1024  # 20 KiB in all, over the 16 KiB limit
+
+    r = as_(ADMIN, tmp_path).post(
+        "/jobs", content=chunks(), headers={"Content-Type": "application/json"}
+    )
+    assert "content-length" not in {k.lower() for k in r.request.headers}
+    assert r.status_code == 413
+
+
+def test_a_small_chunked_body_still_works(tmp_path):
+    import json
+
+    def chunks():
+        yield json.dumps(JOB).encode()
+
+    r = as_(ADMIN, tmp_path).post(
+        "/jobs", content=chunks(), headers={"Content-Type": "application/json"}
+    )
+    assert r.status_code == 201
 
 
 # --- protocol ---

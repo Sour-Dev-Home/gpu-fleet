@@ -136,12 +136,13 @@
     },
     {
       "id": 9, "type": "timeseries", "title": "Trouble signs",
-      "description": "Re-issued leases: a worker vanished mid-job. Busy: the database answered 503 (retried by workers).",
+      "description": "Re-issued leases: a worker vanished mid-job. Busy: the database answered 503. Rate limited: a worker went over 20 requests/s (429). Workers retry both.",
       "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         { "refId": "A", "legendFormat": "leases re-issued", "expr": "sum(increase(fleet_leases_reissued_total[$__rate_interval]))" },
-        { "refId": "B", "legendFormat": "database busy (503)", "expr": "sum(increase(fleet_http_busy_total[$__rate_interval]))" }
+        { "refId": "B", "legendFormat": "database busy (503)", "expr": "sum(increase(fleet_http_busy_total[$__rate_interval]))" },
+        { "refId": "C", "legendFormat": "rate limited (429)", "expr": "sum(increase(fleet_http_limited_total[$__rate_interval]))" }
       ],
       "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineWidth": 2, "drawStyle": "bars", "fillOpacity": 60 } }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }

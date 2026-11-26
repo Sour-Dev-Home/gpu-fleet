@@ -63,7 +63,9 @@ def fleet(tmp_path):
         WORKER,
         ADMIN,
         {"open"},
-        tracing=lambda a: telemetry.trace_app(a, {}, exporter=broker_spans, worker_token=WORKER),
+        tracing=lambda a: telemetry.trace_app(
+            a, {}, exporter=broker_spans, worker_tokens=(WORKER,)
+        ),
     )
     app = separate_process(app)
     global _last_app
@@ -168,7 +170,7 @@ def test_header_capture_is_refused(tmp_path):
     app = create_app(tmp_path / "broker.db", WORKER, ADMIN, {"open"})
     env = {"OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SERVER_REQUEST": ".*"}
     with pytest.raises(ValueError, match="bearer token"):
-        telemetry.trace_app(app, env, exporter=InMemorySpanExporter(), worker_token=WORKER)
+        telemetry.trace_app(app, env, exporter=InMemorySpanExporter(), worker_tokens=(WORKER,))
 
 
 def test_request_spans_record_no_headers(tmp_path):
