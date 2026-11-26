@@ -163,9 +163,15 @@ resource "google_cloud_scheduler_job" "telemetry_flush" {
   time_zone        = "Etc/UTC"
   attempt_deadline = "30s"
 
-  # A missed minute is covered by the next one, and a retry would stack a second flush on the first.
+  # No retries, on purpose: a missed minute is covered by the next one, and a retry would stack a second flush
+  # on the first. Every field is stated at the value the API stores (its defaults, read back from the live job
+  # on 2026-11-26): with retry_count alone, or with no block, the plan flip-flops between + and - retry_config.
   retry_config {
-    retry_count = 0
+    retry_count          = 0
+    min_backoff_duration = "5s"
+    max_backoff_duration = "3600s"
+    max_doublings        = 5
+    max_retry_duration   = "0s"
   }
 
   http_target {

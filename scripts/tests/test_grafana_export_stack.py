@@ -99,7 +99,18 @@ def test_the_scheduler_job_is_every_minute_a_post_with_a_short_deadline_and_no_r
     assert 'schedule         = "* * * * *"' in b
     assert "region           = var.region" in b and "var.region" in b
     assert 'attempt_deadline = "30s"' in b
-    assert re.search(r"retry_count\s*=\s*0\b", b)
+    # No retries, and every retry field stated at the API's stored value: a partial block (or none) made the
+    # plan flip-flop between + and - retry_config (2026-11-26).
+    rc = re.search(r"retry_config\s*\{(.*?)\}", b, re.DOTALL)
+    assert rc
+    for field, value in (
+        ("retry_count", "0"),
+        ("min_backoff_duration", '"5s"'),
+        ("max_backoff_duration", '"3600s"'),
+        ("max_doublings", "5"),
+        ("max_retry_duration", '"0s"'),
+    ):
+        assert re.search(rf"{field}\s*=\s*{re.escape(value)}\s*$", rc.group(1), re.MULTILINE), field
     assert 'http_method = "POST"' in b
     assert '/telemetry/flush"' in b
     assert "count = local.flush_enabled ? 1 : 0" in b
