@@ -1,7 +1,7 @@
 # Observability (ADR 0018): the local stack plus Grafana's all-in-one OTel backend.
 #   ./scripts/with-secrets.ps1 -Names FLEET_WORKER_TOKEN,FLEET_ADMIN_TOKEN -- docker compose -f compose.yaml -f compose.obs.yaml up
-# Grafana: http://127.0.0.1:3000 (admin / admin; loopback only). Explore -> Tempo for traces,
-# Loki for logs, Prometheus for metrics.
+# Grafana: http://127.0.0.1:3000 (admin / admin; loopback only). Dashboards -> Fleet -> Fleet;
+# Alerting -> Alert rules; Explore for your own queries (Prometheus, Tempo, Loki).
 # An override file rather than a profile: it adds the collector AND points the broker and workers at
 # it, in one command. Without this file nothing is exported.
 
@@ -19,6 +19,11 @@ services:
                               # Compose network can send telemetry to it.
     volumes:
       - lgtm-data:/data # metrics, logs and traces survive `compose down` (not `down -v`)
+      # The Fleet dashboard and two alerts, as code (observability/grafana). Read-only: Grafana
+      # can't change them, so the repo stays the only source.
+      - ./observability/grafana/dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/fleet.yaml:ro
+      - ./observability/grafana/dashboards:/fleet/dashboards:ro
+      - ./observability/grafana/alerts.yaml:/otel-lgtm/grafana/conf/provisioning/alerting/fleet.yaml:ro
     restart: unless-stopped
 
   broker:

@@ -1,0 +1,172 @@
+{
+  "uid": "fleet",
+  "title": "Fleet",
+  "description": "Queue, throughput, turnaround SLO (95% within 15 min) and job traces. ADR 0018; edit this file, not the UI.",
+  "tags": ["fleet"],
+  "editable": false,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Queued",
+      "description": "Jobs waiting for a worker (all data classes).",
+      "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum(max by (data_class) (fleet_jobs{state=\"queued\"}))" }],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 2, "type": "stat", "title": "Oldest queued job",
+      "description": "How long the oldest waiting job has waited. Alert above 10 minutes.",
+      "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "max(fleet_queue_oldest_age_seconds)" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null }, { "color": "orange", "value": 300 }, { "color": "red", "value": 600 }
+          ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 3, "type": "stat", "title": "Dead letters",
+      "description": "Jobs that used up their attempts. Any is an alert.",
+      "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum(max by (data_class) (fleet_jobs{state=\"dead\"}))" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none" }
+    },
+    {
+      "id": 4, "type": "stat", "title": "SLO: done within 15 min",
+      "description": "Share of jobs completed in the selected time range whose turnaround (enqueued to done) was at most 900 s. Objective: 95%.",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{
+        "refId": "A", "instant": true,
+        "expr": "sum(increase(fleet_job_turnaround_seconds_bucket{le=\"900\"}[$__range])) / (sum(increase(fleet_job_turnaround_seconds_count[$__range])) > 0)"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit", "decimals": 1, "min": 0, "max": 1,
+          "noValue": "no jobs finished",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 0.95 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" }
+    },
+    {
+      "id": 5, "type": "stat", "title": "Error budget left",
+      "description": "The SLO allows 5% of jobs to take longer than 15 min. 100% = none used; below 0 = overspent.",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{
+        "refId": "A", "instant": true,
+        "expr": "1 - (1 - sum(increase(fleet_job_turnaround_seconds_bucket{le=\"900\"}[$__range])) / (sum(increase(fleet_job_turnaround_seconds_count[$__range])) > 0)) / 0.05"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit", "decimals": 0,
+          "noValue": "no jobs finished",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null }, { "color": "orange", "value": 0 }, { "color": "green", "value": 0.25 }
+          ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" }
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Jobs by state",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{
+        "refId": "A", "legendFormat": "{{state}}",
+        "expr": "sum by (state) (max by (state, data_class) (fleet_jobs))"
+      }],
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Throughput by model",
+      "description": "Jobs completed per second (first completions only; a retried /complete isn't counted twice).",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{
+        "refId": "A", "legendFormat": "{{model}}",
+        "expr": "sum by (model) (rate(fleet_jobs_completed_total[$__rate_interval]))"
+      }],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "lineWidth": 2, "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Turnaround (enqueued to done)",
+      "description": "Percentiles estimated from histogram buckets: exact only at bucket edges (900 s is one).",
+      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "legendFormat": "p50", "expr": "histogram_quantile(0.5, sum by (le) (rate(fleet_job_turnaround_seconds_bucket[$__rate_interval])))" },
+        { "refId": "B", "legendFormat": "p95", "expr": "histogram_quantile(0.95, sum by (le) (rate(fleet_job_turnaround_seconds_bucket[$__rate_interval])))" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s", "custom": { "lineWidth": 2 },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "transparent", "value": null }, { "color": "red", "value": 900 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "Trouble signs",
+      "description": "Re-issued leases: a worker vanished mid-job. Busy: the database answered 503 (retried by workers).",
+      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "legendFormat": "leases re-issued", "expr": "sum(increase(fleet_leases_reissued_total[$__rate_interval]))" },
+        { "refId": "B", "legendFormat": "database busy (503)", "expr": "sum(increase(fleet_http_busy_total[$__rate_interval]))" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineWidth": 2, "drawStyle": "bars", "fillOpacity": 60 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 10, "type": "table", "title": "Slowest job traces (click a trace ID)",
+      "description": "One trace per job attempt: lease, run, store, complete, and the broker's side.",
+      "gridPos": { "x": 0, "y": 20, "w": 12, "h": 9 },
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "targets": [{
+        "refId": "A", "queryType": "traceql", "limit": 20, "tableType": "traces",
+        "query": "{resource.service.name=\"fleet-worker\" && name=\"job\"} | select(span.fleet.model, span.fleet.prompt_version)"
+      }],
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] }
+    },
+    {
+      "id": 11, "type": "logs", "title": "Warnings and errors",
+      "gridPos": { "x": 12, "y": 20, "w": 12, "h": 9 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{
+        "refId": "A",
+        "expr": "{service_name=~\"fleet-.+\"} | severity_text=~\"WARN.*|ERROR|CRITICAL\""
+      }],
+      "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" }
+    }
+  ]
+}

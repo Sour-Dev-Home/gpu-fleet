@@ -1,0 +1,75 @@
+# Two alerts on symptoms, not causes (ADR 0018). Loaded at startup by compose.obs.yaml.
+# No contact point yet: they show under Alerting -> Alert rules. Notifications come in phase 4.
+#
+# Gauges come from every broker instance that reported recently (a restarted broker leaves the old
+# series behind for ~5 minutes), so they're combined with max, never sum: they describe one queue.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: fleet
+    folder: Fleet
+    interval: 1m
+    rules:
+      - uid: fleet-dead-letters
+        title: Dead letters
+        # Like an SQS dead-letter-queue alarm: any job that used up its attempts needs a person.
+        # It keeps firing until the job is dealt with, on purpose.
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: sum(max by (data_class) (fleet_jobs{state="dead"}))
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        for: 0s
+        noDataState: OK # "broker not reporting" is the other alert's job
+        execErrState: Error
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $values.A }} dead-lettered job(s): they ran out of attempts"
+          description: Find them with the broker's database or the job's traces (status=error).
+
+      - uid: fleet-queue-stuck
+        title: Oldest queued job waiting over 10 minutes
+        # The symptom behind most causes: no worker running, none that can run this job
+        # (capability or clearance), or workers failing. The SLO only counts finished jobs; this
+        # catches the ones that never finish.
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: max(fleet_queue_oldest_age_seconds)
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [600] }
+        for: 2m
+        # Known false alarm: for ~5 min after a broker restart, the old instance's last value still
+        # counts in max(); if a job had waited >10 min just before, this can fire once. Accepted.
+        # The gauge reports 0 for an empty queue, so no data means the broker stopped reporting:
+        # then nobody can tell whether jobs are moving. Treat that as firing.
+        noDataState: Alerting
+        execErrState: Error
+        labels: { severity: warning }
+        annotations:
+          summary: "The oldest queued job has waited {{ humanizeDuration $values.A.Value }}"
+          description: Check that a worker is running with this job's prompt version, model and clearance.

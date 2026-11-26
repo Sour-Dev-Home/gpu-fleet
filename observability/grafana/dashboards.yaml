@@ -1,0 +1,13 @@
+# Grafana loads every dashboard JSON in /fleet/dashboards at startup (ADR 0018). Mounted by
+# compose.obs.yaml. Edits made in the UI aren't saved back: change the JSON here and restart.
+apiVersion: 1
+
+providers:
+  - name: fleet
+    folder: Fleet
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /fleet/dashboards
+      foldersFromFilesStructure: false
