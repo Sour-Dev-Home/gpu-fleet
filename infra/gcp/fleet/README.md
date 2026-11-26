@@ -47,22 +47,27 @@ This makes everything except the Cloud Run service (`broker_image` is null).
 ## 4. The two broker tokens (new ones for the cloud)
 
 Generate NEW tokens (not the local ones; docs/secrets.md) straight into the vault under cloud names, then add them as
-secret versions. Python reads the variable itself and writes it with no newline, so the token appears on no command line.
-This needs PowerShell 7.4+ (check `$PSVersionTable.PSVersion`): its native-command pipes pass raw bytes, while older
-versions append a newline.
+secret versions. Python reads the variable itself and hands the exact bytes to gcloud on its stdin, so the token
+appears on no command line. Do NOT pipe it from PowerShell (`python ... | gcloud ... --data-file=-`): that stored the
+token plus "\r\n" (46 bytes, measured), even on PowerShell 7.6.
 
 ```powershell
 foreach ($n in 'FLEET_CLOUD_WORKER_TOKEN','FLEET_CLOUD_ADMIN_TOKEN') {
   Set-Secret -Vault fleet -Name $n -Secret ([Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)))
 }
-../../../scripts/with-secrets.ps1 -Names FLEET_CLOUD_WORKER_TOKEN -- pwsh -NoProfile -Command "python -c `"import os,sys;sys.stdout.write(os.environ['FLEET_CLOUD_WORKER_TOKEN'])`" | gcloud secrets versions add fleet-worker-token --data-file=-"
-../../../scripts/with-secrets.ps1 -Names FLEET_CLOUD_ADMIN_TOKEN -- pwsh -NoProfile -Command "python -c `"import os,sys;sys.stdout.write(os.environ['FLEET_CLOUD_ADMIN_TOKEN'])`" | gcloud secrets versions add fleet-admin-token --data-file=-"
+$add = "import os,shutil,subprocess,sys; subprocess.run([shutil.which('gcloud'),'secrets','versions','add',sys.argv[2],'--data-file=-'],input=os.environ[sys.argv[1]].encode(),check=True)"
+../../../scripts/with-secrets.ps1 -Names FLEET_CLOUD_WORKER_TOKEN -- python -c $add FLEET_CLOUD_WORKER_TOKEN fleet-worker-token
+../../../scripts/with-secrets.ps1 -Names FLEET_CLOUD_ADMIN_TOKEN -- python -c $add FLEET_CLOUD_ADMIN_TOKEN fleet-admin-token
 ```
 
-UNTESTED. Check only the length, never the value (a base64 token of 32 bytes is 44 bytes):
+Check the STORED bytes, never the value. Printing to stdout adds its own newline, so write to a file, measure it and
+delete it (a base64 token of 32 bytes is 44 bytes, with no whitespace at either end). Expect `44 True`:
 
 ```powershell
-gcloud secrets versions access latest --secret=fleet-worker-token | python -c "import sys;print(len(sys.stdin.buffer.read()))"
+$f = Join-Path $env:TEMP "fleet-secret-check"
+gcloud secrets versions access latest --secret=fleet-worker-token --out-file=$f
+python -c "import sys;b=open(sys.argv[1],'rb').read();print(len(b),b==b.strip())" $f
+Remove-Item $f
 ```
 
 A different number (45 or 46) means a stray newline got in, and the broker would reject its own workers.
@@ -86,37 +91,37 @@ Set-Clipboard -Value $null
 
 Don't use `--password=`: gcloud records its command line in its logs.
 
-## 6. One-time bootstrap: let the IAM user own the database (UNTESTED)
+## 6. One-time bootstrap: let the IAM user create tables
 
 This must come before step 8. The broker runs its migrations at STARTUP as the IAM user; without the grant the
 startup probe fails, the revision never becomes ready and step 8's apply errors. The cause is SQLSTATE 42501
 ("permission denied") in the revision's logs, not a 503.
 
-As `postgres`, through the proxy under your own login (you need `roles/cloudsql.client`; an Owner has it). Port
-5433, so it can't reach a local Docker postgres on 5432:
+`scripts/bootstrap-cloudsql.ps1` does it all in Docker: it runs the pinned Auth Proxy and `psql` images on a private
+Docker network (nothing is published on the host, so it can't touch a local postgres), with your own login
+(application default credentials) mounted read-only, and the postgres password only as an environment variable from
+the vault. It needs `roles/cloudsql.client` (an Owner has it). Least privilege, no ownership transfer and no role
+membership (on PostgreSQL 16+ granting the IAM role to `postgres` may be refused):
+`GRANT CONNECT, CREATE ON DATABASE fleet` and `GRANT USAGE, CREATE ON SCHEMA public` to the IAM user.
 
 ```powershell
-$conn = tf output -raw instance_connection_name
-$u    = tf output -raw iam_database_user
-cloud-sql-proxy $conn --port 5433          # leave running; use a second terminal for psql
+$env:AWS_PROFILE = "fleet"      # the script calls terraform output
+../../../scripts/with-secrets.ps1 -Names FLEET_CLOUDSQL_POSTGRES_PASSWORD -- pwsh -NoProfile -File ../../../scripts/bootstrap-cloudsql.ps1
 ```
 
-In a second terminal, psql gets the password as PGPASSWORD from the vault, so nothing is pasted or printed:
+Expected output (the second line is `max_connections`; 25 on `db-f1-micro`):
 
-```powershell
-../../../scripts/with-secrets.ps1 -Names FLEET_CLOUDSQL_POSTGRES_PASSWORD -- pwsh -NoProfile -Command '$env:PGPASSWORD = $env:FLEET_CLOUDSQL_POSTGRES_PASSWORD; psql -h 127.0.0.1 -p 5433 -U postgres -d fleet'
+```
+ result
+---------
+ granted
+ max_connections
+-----------------
+ 25
 ```
 
-```sql
-GRANT "<iam user>" TO postgres;
-ALTER DATABASE fleet OWNER TO "<iam user>";
--- fallback if the migrations still say "permission denied for schema public":
-GRANT ALL ON SCHEMA public TO "<iam user>";
--- optional afterwards, so postgres isn't a member of the broker's role:
-REVOKE "<iam user>" FROM postgres;
-```
-
-UNTESTED: written from the docs.
+(psql's table layout may differ slightly.) Both image references in the script are checked against the pins in
+`cloudrun.tf` and `compose.yaml` by `scripts/tests/test_gcp_stack.py`.
 
 ## 7. Build and push the image (a unique tag per build)
 
@@ -145,20 +150,26 @@ tf plan "-out=tfplan"; tf apply tfplan
 
 ## 9. Smoke test
 
-The token goes through curl's variables, not its command line (`--variable` and `--expand-header` need curl 8.3+;
-this PC has curl 8.19.0 as `curl.exe`, so they work; check yours with `curl.exe --version`).
+Don't use `/healthz` from outside: Google's front end reserves it on run.app URLs and answers with its own HTML 404
+(measured); startup probes bypass it. Three checks instead (the first call is a cold start: a few seconds):
 
 ```powershell
 $url = tf output -raw service_url
-curl.exe -i "$url/healthz"                                   # 204 (the first call is a cold start: a few seconds)
-$env:URL = $url
 Set-Content body.json '{"capabilities":["smoke"],"models":["smoke"]}'     # no secret in it
-../../../scripts/with-secrets.ps1 -Names FLEET_CLOUD_WORKER_TOKEN -- pwsh -NoProfile -Command 'curl.exe -i -X POST --variable %FLEET_CLOUD_WORKER_TOKEN --expand-header "Authorization: Bearer {{FLEET_CLOUD_WORKER_TOKEN}}" -H "Content-Type: application/json" -d "@body.json" "$env:URL/lease"'
+curl.exe -i "$url/nope"                                                    # 404 {"detail":"Not Found"}: the broker answered
+curl.exe -i -X POST -H "Content-Type: application/json" -d "@body.json" "$url/lease"      # 401: no token
 Remove-Item body.json
 ```
 
-With an empty queue (or nothing matching) the answer is `204`. A `401` means the secret version has a stray newline
-(step 4); a revision that never started means the grant (step 6).
+Then `/lease` with the worker token. Python reads the token from Secret Manager itself, so it is never on a command
+line; expect `204` (an empty queue, or nothing matching):
+
+```powershell
+python -c "import http.client,json,shutil,subprocess,sys,urllib.parse as p; t=subprocess.run([shutil.which('gcloud'),'secrets','versions','access','latest','--secret=fleet-worker-token'],capture_output=True,text=True,check=True).stdout.strip(); c=http.client.HTTPSConnection(p.urlparse(sys.argv[1]).netloc); c.request('POST','/lease',json.dumps({'capabilities':['smoke'],'models':['smoke']}),{'Authorization':'Bearer '+t,'Content-Type':'application/json'}); print(c.getresponse().status)" $url
+```
+
+The unknown-path 404 as JSON proves the request reached the container; a revision that never started means the grant
+(step 6); a `401` with the token means the stored version has stray bytes (step 4's check).
 
 ## Rotating the broker's tokens
 

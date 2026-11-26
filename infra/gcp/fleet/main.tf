@@ -72,9 +72,8 @@ resource "google_service_account" "broker" {
 }
 
 # Cloud SQL roles are granted on the project (Cloud SQL has no per-instance binding), narrowed by an IAM
-# condition to this one instance. UNVERIFIED that the API accepts conditions on both roles: `validate` only
-# checks the schema, so a refusal would show at apply. The service account's only other permissions are the
-# secrets below.
+# condition to this one instance. The API accepted conditions on both roles (applied, and the broker logs in).
+# The service account's only other permissions are the secrets below.
 resource "google_project_iam_member" "sql_client" {
   project = var.project_id
   role    = "roles/cloudsql.client" # connect through the Auth Proxy

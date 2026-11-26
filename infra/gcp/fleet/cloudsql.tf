@@ -26,8 +26,7 @@ resource "google_sql_database_instance" "fleet" {
 
     backup_configuration {
       enabled = true
-      # Point-in-time recovery stores the write-ahead log. PostgreSQL offers it on every tier as far as the
-      # docs say; UNVERIFIED for db-f1-micro, so a failed apply here means: set this to false (backups only).
+      # Point-in-time recovery stores the write-ahead log. Applied on db-f1-micro without complaint.
       point_in_time_recovery_enabled = true
       start_time                     = "07:00" # UTC, the quietest hour for the maintainer's time zone
 
@@ -49,8 +48,7 @@ resource "google_sql_database_instance" "fleet" {
 
     # Security logging. Napkin math: a few hundred connections a day (the pool opens at most 4 per instance and
     # recycles every 30 minutes) at about 200 bytes a line is under 15 MB a month, against 50 GiB free.
-    # UNVERIFIED: PostgreSQL 18 changed log_connections from a bool to a list of options; if apply refuses
-    # "on", the flag needs the value the Cloud SQL docs list for 18 (e.g. "authentication").
+    # All six flags were accepted on POSTGRES_18, including log_connections = "on".
     database_flags {
       name  = "log_connections"
       value = "on"

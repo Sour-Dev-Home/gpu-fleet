@@ -16,13 +16,15 @@ docs/research/phase-4.md.
   instance's network; the broker connects to `127.0.0.1:5432` with no password. `--auto-iam-authn` logs in as the
   service account `fleet-broker`; the database user is its email without `.gserviceaccount.com`. The account has
   only `cloudsql.client` and `cloudsql.instanceUser` (project level, narrowed by an IAM condition to this
-  instance; the API accepting conditions on both roles is UNVERIFIED) and `secretmanager.secretAccessor` on the two secrets only.
+  instance; applied and working) and `secretmanager.secretAccessor` on the two secrets only.
 - **Public IP, connectors required, TLS only (Q57).** `ipv4_enabled`, no authorized networks,
   `connector_enforcement = REQUIRED`, `ssl_mode = ENCRYPTED_ONLY`. The address is reachable but useless without
   the proxy and IAM. **Rejected for now:** private IP with Direct VPC egress (a /26 subnet, private services
   access, more to learn and to pay for, UNVERIFIED); revisit with GKE.
-- **Bootstrap by runbook, not the postgresql provider (Q58).** One-time `GRANT` and `ALTER DATABASE ... OWNER`
-  as `postgres` through a local proxy. No `root_password` in Terraform: the postgres password is set with gcloud
+- **Bootstrap by runbook, not the postgresql provider (Q58).** One-time least-privilege grants to the IAM user
+  (`CONNECT, CREATE` on the database, `USAGE, CREATE` on schema `public`: no ownership transfer and no role
+  membership, which PostgreSQL 16+ may refuse), run as `postgres` by `scripts/bootstrap-cloudsql.ps1`: the pinned
+  proxy and `psql` images on a private Docker network, with the maintainer's own login. No `root_password` in Terraform: the postgres password is set with gcloud
   and held in the vault, so it never enters state. The provider would need a network path from wherever Terraform
   runs and a password in state, for a step done once.
 - **Secret containers in Terraform, values outside (Q59).** `fleet-worker-token` and `fleet-admin-token` exist
@@ -38,12 +40,15 @@ docs/research/phase-4.md.
   request-based billing, timeout 30 s, generation 1 (faster cold starts; nothing
   here needs generation 2). Concurrency 40: Little's law with 3 ms of SQL per request gives 40 x 0.003 = 0.12
   connections busy per instance, so the pool of 4 (ADR 0020) is ample even if every request hits the database;
-  and at 3 instances 3 x 4 = 12 connections stay under the tier's limit (about 25, UNVERIFIED). Startup probes on `/healthz`
-  and on the proxy's `/startup`; the broker starts after the proxy is ready. The cloud broker runs with
+  and `max_connections` on `db-f1-micro` is 25 (measured): 1 instance x 4 = 4 now, 3 x 4 = 12 at most.
+  Startup probes on `/healthz` and on the proxy's `/startup`; the broker starts after the proxy is ready.
+  From outside, `/healthz` is reserved by Google's front end on run.app URLs, which answers with its own HTML 404
+  (measured; startup probes bypass it), so the smoke test uses an unknown path and `/lease` instead. The cloud broker runs with
   `FLEET_WORKER_CLEARANCE=open` (ADR 0015): cloud workers are volunteers' stand-ins, and footage or derived
   text stay on the maintainer's own backends.
 - **Maintenance (Q62):** Sunday 09:00 UTC (04:00 Eastern), stable track; backups 7 retained, daily 07:00 UTC,
-  point-in-time recovery on (UNVERIFIED that `db-f1-micro` allows it; if apply refuses, backups only).
+  point-in-time recovery on (accepted on `db-f1-micro`). All six database flags, including `log_connections=on`,
+  were accepted on POSTGRES_18. Creating the instance took about 14 minutes.
 - **Request log excluded (Q64).** A project log exclusion drops Cloud Run's request log for this service. It
   records every caller's IP and user agent, and ADR 0018 promised that volunteers' and strangers' IPs are not
   stored. Only requests below status 500 are dropped: Cloud Run's own failures (no instance, timeouts) are
@@ -68,7 +73,8 @@ docs/research/phase-4.md.
   are reportedly no longer free (about $1.50/month per condition; one here): UNVERIFIED, check the first bill.
 - The Auth Proxy is a second process in every instance: more memory (256 MiB) and one more image to bump by hand
   (Dependabot does not read `.tf`).
-- The first deploy needs the manual steps in `infra/gcp/fleet/README.md`; the GRANT is UNTESTED until run.
+- The first deploy needs the manual steps in `infra/gcp/fleet/README.md`; the bootstrap script ran successfully on the first deploy. Still open (UNVERIFIED): the alert's cost and filter, and
+  whether Cloud Run bills 429 and IAM-denied requests.
 - The public Cloud SQL IP is a standing finding for scanners (trivy GCP-0017): accepted and annotated.
 - Teardown takes three flags off first (README step 10).
 

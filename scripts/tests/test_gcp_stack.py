@@ -185,16 +185,34 @@ def test_readme_runbook_keeps_secrets_off_command_lines():
     )  # commands only; prose may name the flag
     assert "--password=" not in fenced
     assert "--prompt-for-password" in text
-    assert "--port 5433" in text and "-p 5433" in text
+    assert "bootstrap-cloudsql.ps1" in text and "cloud-sql-proxy $conn" not in text
     assert "set-quota-project" in text
-    assert "--expand-header" in text
-    assert "PowerShell 7.4+" in text
+    # A PowerShell pipe to gcloud stored the token plus "\r\n" (measured): Python hands it over on stdin.
+    assert "| gcloud secrets versions add" not in fenced and "raw bytes" not in text
+    assert "input=os.environ[sys.argv[1]].encode()" in fenced
+    assert "--out-file=" in fenced  # the stored bytes are measured from a file, not stdout
+    assert "/healthz" not in fenced  # reserved by Google's front end on run.app URLs
+    assert '"$url/nope"' in fenced and "subprocess.run" in fenced
+    assert "--expand-header" not in text and "curl.exe -i -X POST --variable" not in fenced
     assert '-d "@body.json"' in text and '\\"' not in fenced
-    assert "PGPASSWORD" in text and "Set-Clipboard -Value $null" in text
+    assert "Set-Clipboard -Value $null" in text
     for line in text.splitlines():  # a plaintext secret is never printed to the console
         if "-AsPlainText" in line:
             assert "| Set-Clipboard" in line, line
     assert "secrets versions disable" in text and "secrets versions destroy" in text
+
+
+def test_bootstrap_script_uses_the_pinned_images_and_least_privilege():
+    script = (ROOT / "scripts" / "bootstrap-cloudsql.ps1").read_text(encoding="utf-8")
+    proxy = re.search(r"\$proxyImage\s*=\s*'([^']+)'", script).group(1)
+    pg = re.search(r"\$pgImage\s*=\s*'([^']+)'", script).group(1)
+    assert proxy in (STACK / "cloudrun.tf").read_text(encoding="utf-8")
+    assert pg in (ROOT / "compose.yaml").read_text(encoding="utf-8")
+    assert "GRANT CONNECT, CREATE ON DATABASE fleet" in script
+    assert "GRANT USAGE, CREATE ON SCHEMA public" in script
+    assert not re.search(r"OWNER TO|GRANT \"\$user\" TO|ALL PRIVILEGES", script)
+    assert ":ro" in script  # the login is mounted read-only
+    assert not re.search(r"[A-Za-z]:[\\/]Users", script)  # no absolute user path
 
 
 def test_alert_cost_is_recorded_as_unverified():
