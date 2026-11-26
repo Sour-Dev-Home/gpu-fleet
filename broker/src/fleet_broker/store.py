@@ -339,33 +339,34 @@ class JobStore:
             ).fetchone()
         return None if row is None else row["lease_expires_at"]
 
-    def declare_result(
-        self, job_id: str, lease_token: str, result_key: str, sha256: str, size: int
-    ) -> str | None:
-        """Record what the lease holder is about to upload, and return the job's result key
-        (recomputed from its own row, never the caller's), or None if the caller does not hold
-        the lease. Raises ResultKeyMismatch if `result_key` is not that key (ADR 0023).
-
-        /complete later compares the stored object with this declaration (ADR 0025). A second
-        call replaces the first."""
-        token = _digest(lease_token)
+    def holder_key(self, job_id: str, lease_token: str, result_key: str) -> str | None:
+        """The job's result key (recomputed from its own row, never the caller's) if the caller
+        holds its lease, else None. Raises ResultKeyMismatch if `result_key` is not that key
+        (ADR 0023). Changes nothing: /upload-url asks S3 about the key only after this."""
         with self.pool.connection() as conn:
             job = conn.execute(
                 "SELECT input_sha256, model, prompt_version, context_sha256 FROM jobs"
                 " WHERE job_id = %s AND lease_token = %s AND state = 'leased'",
-                (job_id, token),
+                (job_id, _digest(lease_token)),
             ).fetchone()
-            if job is None:
-                return None
-            key = result_key_for(job)
-            if key != result_key:
-                raise ResultKeyMismatch(job_id)
+        if job is None:
+            return None
+        key = result_key_for(job)
+        if key != result_key:
+            raise ResultKeyMismatch(job_id)
+        return key
+
+    def declare_result(self, job_id: str, lease_token: str, sha256: str, size: int) -> bool:
+        """Record the SHA-256 (hex) and length of the result the lease holder is about to upload,
+        or of the one already stored (ADR 0025). /complete compares the stored object with this.
+        A second call replaces the first. False if the caller no longer holds the lease."""
+        with self.pool.connection() as conn:
             row = conn.execute(
                 "UPDATE jobs SET result_sha256 = %s, result_size = %s"
                 " WHERE job_id = %s AND lease_token = %s AND state = 'leased' RETURNING job_id",
-                (sha256, size, job_id, token),
+                (sha256, size, job_id, _digest(lease_token)),
             ).fetchone()
-        return None if row is None else key
+        return row is not None
 
     def upload_facts(self, job_id: str, lease_token: str) -> dict[str, Any] | None:
         """For the holder of the lease on a leased or done job: the declared upload and the

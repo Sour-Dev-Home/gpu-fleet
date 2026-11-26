@@ -5,16 +5,18 @@ fakes, phase 1 plugs in the HTTP broker client and phase 3 an S3 store behind pr
 """
 
 import logging
+import random
 import threading
 import time
 from collections.abc import Callable
-from typing import Literal, Protocol
+from typing import Literal, Protocol, TypeVar
 
 from . import telemetry
 from .backoff import Backoff
 from .protocol import Job, Lease
 
 log = logging.getLogger(__name__)
+T = TypeVar("T")
 
 
 class LeaseLost(Exception):
@@ -23,6 +25,34 @@ class LeaseLost(Exception):
 
 class TransientError(Exception):
     """The broker is unreachable or failing (network error, 5xx). Wait and try again."""
+
+
+RETRIES = 3  # after the first try: waits of 1, 2 and 4 seconds, each up to 50% longer
+
+
+def retry_transient(
+    fn: Callable[[], T],
+    sleep: Callable[[float], None] = time.sleep,
+    rng: Callable[[], float] = random.random,
+    between: Callable[[], None] = lambda: None,
+) -> T:
+    """Call fn, retrying a TransientError up to RETRIES times with exponential backoff and jitter.
+
+    A blip at S3 or a 503 from the broker should not cost the job its attempt (3 attempts
+    dead-letter it). `between` runs after each wait, before the retry: the Worker passes its
+    keepalive so the lease is renewed while it waits. Anything but TransientError, and the last
+    TransientError, propagate."""
+    for attempt in range(RETRIES + 1):
+        try:
+            return fn()
+        except TransientError as e:
+            if attempt == RETRIES:
+                raise
+            delay = 2.0**attempt * (1 + rng() * 0.5)
+            log.warning("transient failure, retrying in %.1fs: %s", delay, e)
+            sleep(delay)
+            between()
+    raise AssertionError("unreachable")
 
 
 class ResultRejected(SystemExit):
@@ -143,6 +173,8 @@ class Worker:
         validate: Callable[[Job, bytes], None] = require_nonempty,
         heartbeat_poll_seconds: float = 1.0,
         url_store: Callable[[Lease], UrlResultStore] | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        rng: Callable[[], float] = random.random,
     ) -> None:
         if not isinstance(getattr(runner, "prompt_versions", None), frozenset):
             raise TypeError(f"runner {runner!r} must declare prompt_versions (a frozenset)")
@@ -153,6 +185,8 @@ class Worker:
         # Builds the store for a lease that carries presigned URLs (S3 mode, ADR 0025); the
         # `store` above serves every other lease, exactly as before.
         self.url_store = url_store
+        # Used to wait between retries of an upload or a completion (retry_transient).
+        self._retry_sleep, self._retry_rng = sleep, rng
         self.runner = runner
         self.clock = clock
         self.validate = validate
@@ -226,6 +260,11 @@ class Worker:
             raise problem[0]
         return result
 
+    def _retry(self, fn: Callable[[], T]) -> T:
+        """fn with retry_transient, renewing the lease between attempts (a LeaseLost from that
+        renewal ends the retries: the job is no longer ours to finish)."""
+        return retry_transient(fn, self._retry_sleep, self._retry_rng, between=self.keepalive)
+
     def run_once(self) -> Outcome | None:
         """Lease and process one job. Returns None when the broker has no work."""
         asked = time.time_ns()
@@ -271,18 +310,18 @@ class Worker:
         fields = {"job_id": job.job_id, "model": job.model, "prompt_version": job.prompt_version}
         if store.exists(key):
             with telemetry.span("complete", **{"fleet.cached": True}):
-                self.broker.complete(self.lease, key)
+                self._retry(lambda: self.broker.complete(self.lease, key))
             log.info("job completed from a stored result", extra={**fields, "status": "cached"})
             return "cached"
         with telemetry.span("run"):  # the model call: where a slow job spends its time
             result = self._run_with_heartbeat(self.lease.job, store)
         self.validate(self.lease.job, result)  # raises InvalidResult: nothing stored or completed
         with telemetry.span("store"):
-            store.put(key, result)
+            self._retry(lambda: store.put(key, result))
         with telemetry.span(
             "complete"
         ):  # its POST carries traceparent: the broker's span nests here
-            self.broker.complete(self.lease, key)
+            self._retry(lambda: self.broker.complete(self.lease, key))
         log.info("job completed", extra={**fields, "status": "ran"})
         return "ran"
 

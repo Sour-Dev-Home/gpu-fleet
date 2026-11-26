@@ -130,15 +130,51 @@ def test_head_of_an_object_without_a_checksum_says_so():
     assert info.checksum_sha256 is None
 
 
-@pytest.mark.parametrize("status", ["404", "403"])
-def test_a_missing_object_is_none_whether_s3_says_404_or_403(status):
-    # Without s3:ListBucket, S3 answers 403 for a key that does not exist (ADR 0025).
+def test_a_missing_object_is_none_on_404():
     client = make_client()
     with Stubber(client) as stub:
-        stub.add_client_error(
-            "head_object", http_status_code=int(status), service_error_code=status
-        )
+        stub.add_client_error("head_object", http_status_code=404, service_error_code="404")
         assert bucket(client).head(f"results/{A}") is None
+
+
+def test_403_is_unavailable_not_missing():
+    # The role has s3:ListBucket (ADR 0025), so a missing key is a real 404; a 403 means the
+    # role or the bucket policy is wrong, which must be loud and must not read as "not stored".
+    client = make_client()
+    with Stubber(client) as stub:
+        stub.add_client_error("head_object", http_status_code=403, service_error_code="403")
+        with pytest.raises(s3.BucketUnavailable):
+            bucket(client).head(f"results/{A}")
+
+
+def test_check_resolves_credentials_and_turns_failure_into_unavailable():
+    class Creds:
+        def __init__(self, fail):
+            self.fail, self.calls = fail, 0
+
+        def get_frozen_credentials(self):
+            self.calls += 1
+            if self.fail:
+                raise RuntimeError("sts said token=hunter2")
+
+    ok, bad = Creds(False), Creds(True)
+    s3.ResultBucket(make_client(), BUCKET, credentials=ok).check()
+    assert ok.calls == 1
+    with pytest.raises(s3.BucketUnavailable) as e:
+        s3.ResultBucket(make_client(), BUCKET, credentials=bad).check()
+    assert "hunter2" not in str(e.value)
+
+
+def test_a_presign_failure_is_unavailable_and_names_only_the_type():
+    class Boom:
+        def generate_presigned_url(self, *a, **k):
+            raise RuntimeError("secret")
+
+    with pytest.raises(s3.BucketUnavailable) as e:
+        s3.ResultBucket(Boom(), BUCKET).get_url("inputs/x")
+    assert "secret" not in str(e.value) and "RuntimeError" in str(e.value)
+    with pytest.raises(s3.BucketUnavailable):
+        s3.ResultBucket(Boom(), BUCKET).put_target("results/x", "b" * 64, 1)
 
 
 def test_any_other_s3_failure_is_unavailable_not_missing():

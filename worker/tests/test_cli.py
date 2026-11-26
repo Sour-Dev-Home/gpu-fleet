@@ -94,6 +94,36 @@ def test_the_url_store_uses_a_client_that_never_carries_the_worker_token(tmp_pat
     assert "authorization" in client.clients[0].headers
 
 
+def test_the_url_store_is_pinned_to_the_configured_bucket_host(tmp_path):
+    from fleet_worker.protocol import Lease
+
+    env = ENV | {
+        "FLEET_RESULTS_DIR": str(tmp_path),
+        "FLEET_RESULTS_HOST": " Fleet-Results-ABC.s3.amazonaws.com ",
+        "FLEET_ALLOW_HTTP": "1",  # must not loosen it
+    }
+    worker, clients = build(Config(env))
+    clients.close()
+    lease = Lease(Job("j", "a" * 64, "echo", "echo-v1"), "t", 60.0, 0.0, "https://x/y")
+    assert worker.url_store(lease).results_host == "fleet-results-abc.s3.amazonaws.com"
+
+
+def test_without_fleet_results_host_the_worker_refuses_every_presigned_url(tmp_path):
+    from fleet_worker.protocol import Lease
+
+    worker, clients = build(Config(ENV | {"FLEET_RESULTS_DIR": str(tmp_path)}))
+    clients.close()
+    lease = Lease(Job("j", "a" * 64, "echo", "echo-v1"), "t", 60.0, 0.0, "https://x/y")
+    with pytest.raises(ValueError, match="FLEET_RESULTS_HOST"):
+        worker.url_store(lease).fetch_inputs()
+
+
+@pytest.mark.parametrize("bad", ["https://h.s3.amazonaws.com", "h/s3", "h:443", "a b", "h@x"])
+def test_a_malformed_results_host_stops_the_worker_at_startup(bad):
+    with pytest.raises(SystemExit, match="FLEET_RESULTS_HOST"):
+        Config(ENV | {"FLEET_RESULTS_HOST": bad})
+
+
 def test_echo_runner_is_deterministic():
     job = Job("j", "a" * 64, "m", "v1")
     assert echo(job, lambda: None) == echo(job, lambda: None)

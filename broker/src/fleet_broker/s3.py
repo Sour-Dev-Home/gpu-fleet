@@ -31,10 +31,6 @@ MAX_RESULT_BYTES_LIMIT = 5 * 1024**3  # S3's single-PUT ceiling: a larger cap co
 DISABLED = "presigned_urls_disabled"  # the code of /upload-url's 404 in local mode
 S3_ENV = ("FLEET_RESULTS_BUCKET", "FLEET_AWS_ROLE_ARN", "FLEET_AWS_AUDIENCE")
 
-# What S3 says to a HEAD for a key that is not there. Without s3:ListBucket (the broker's role has
-# none), S3 answers 403 instead of 404, so the two are the same fact here.
-_MISSING_STATUS = {404, 403}
-
 
 class BucketUnavailable(Exception):
     """S3 could not answer (network, 5xx, throttling, credentials): retry later."""
@@ -46,6 +42,11 @@ def input_key(sha256: str) -> str:
 
 def result_object_key(result_key: str) -> str:
     return f"results/{result_key}"
+
+
+def hex_digest(b64: str) -> str:
+    """The inverse of b64_digest: S3 reports a checksum in base64, the job row keeps hex."""
+    return base64.b64decode(b64).hex()
 
 
 def b64_digest(sha256_hex: str) -> str:
@@ -79,14 +80,29 @@ def client_config() -> Config:
 
 
 class ResultBucket:
-    def __init__(self, client: Any, bucket: str) -> None:
+    def __init__(self, client: Any, bucket: str, credentials: Any = None) -> None:
         self.client = client
         self.bucket = bucket
+        self.credentials = credentials  # the refreshing credentials the client signs with
+
+    def check(self) -> None:
+        """Resolve the signing credentials now (renewing them if due), so an STS or metadata
+        outage surfaces BEFORE a job is claimed: a claim costs the job an attempt. Local
+        when the credentials are fresh. Only the exception's type is kept."""
+        if self.credentials is None:
+            return
+        try:
+            self.credentials.get_frozen_credentials()
+        except Exception as e:  # noqa: BLE001 - any failure to get credentials is "unavailable"
+            raise BucketUnavailable(type(e).__name__) from None
 
     def get_url(self, key: str, expires: int = GET_SECONDS) -> str:
-        return self.client.generate_presigned_url(
-            "get_object", Params={"Bucket": self.bucket, "Key": key}, ExpiresIn=expires
-        )
+        try:
+            return self.client.generate_presigned_url(
+                "get_object", Params={"Bucket": self.bucket, "Key": key}, ExpiresIn=expires
+            )
+        except Exception as e:  # noqa: BLE001
+            raise BucketUnavailable(type(e).__name__) from None
 
     def put_target(
         self, key: str, sha256_hex: str, size: int, expires: int = PUT_SECONDS
@@ -97,17 +113,20 @@ class ResultBucket:
         Whether S3 enforces each of them on a presigned PUT is checked by scripts/probe-presign.py;
         /complete verifies the stored object either way (HEAD)."""
         checksum = b64_digest(sha256_hex)
-        url = self.client.generate_presigned_url(
-            "put_object",
-            Params={
-                "Bucket": self.bucket,
-                "Key": key,
-                "ContentLength": size,
-                "ChecksumSHA256": checksum,
-                "IfNoneMatch": "*",
-            },
-            ExpiresIn=expires,
-        )
+        try:
+            url = self.client.generate_presigned_url(
+                "put_object",
+                Params={
+                    "Bucket": self.bucket,
+                    "Key": key,
+                    "ContentLength": size,
+                    "ChecksumSHA256": checksum,
+                    "IfNoneMatch": "*",
+                },
+                ExpiresIn=expires,
+            )
+        except Exception as e:  # noqa: BLE001
+            raise BucketUnavailable(type(e).__name__) from None
         signed = _signed_headers(url)
         wanted = {"x-amz-checksum-sha256": checksum, "If-None-Match": "*"}
         # Only what the signature covers: an extra x-amz-* header would make S3 refuse the PUT.
@@ -120,8 +139,9 @@ class ResultBucket:
             r = self.client.head_object(Bucket=self.bucket, Key=key, ChecksumMode="ENABLED")
         except ClientError as e:
             status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
-            if status in _MISSING_STATUS:
+            if status == 404:  # the role may list the bucket, so a missing key is a real 404
                 return None
+            # 403 included: the role or the bucket policy is wrong. Not "missing".
             raise BucketUnavailable(str(e.response.get("Error", {}).get("Code") or status)) from e
         except BotoCoreError as e:  # no connection, timeout, no credentials
             raise BucketUnavailable(type(e).__name__) from e
@@ -165,7 +185,7 @@ def bucket_from_env(
     )
     session = _session(credentials)
     client = session.client("s3", region_name=given["AWS_REGION"], config=client_config())
-    return ResultBucket(client, given["FLEET_RESULTS_BUCKET"])
+    return ResultBucket(client, given["FLEET_RESULTS_BUCKET"], credentials)
 
 
 def _session(credentials: Any) -> boto3.Session:

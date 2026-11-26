@@ -113,9 +113,12 @@ class HttpBroker:
         # A copy, since Lease is frozen, stamped with the time the request was SENT.
         return replace(lease, ttl_seconds=r.json()["ttl_seconds"], received_at=sent_at)
 
-    def upload_url(self, lease: Lease, result_key: str, sha256: str, size: int) -> UploadTarget:
+    def upload_url(
+        self, lease: Lease, result_key: str, sha256: str, size: int
+    ) -> UploadTarget | None:
         """Ask for a presigned PUT for this job's result: `sha256` (hex) and `size` of the bytes
-        are signed into it, so S3 accepts only exactly those bytes (ADR 0025)."""
+        are signed into it, so S3 accepts only exactly those bytes (ADR 0025). None means a
+        result is already stored and the broker adopted it: do not upload."""
         r = self._post(
             "/upload-url",
             json={
@@ -137,6 +140,8 @@ class HttpBroker:
         # worker is pointed at the wrong broker. Nothing a retry fixes: stop loudly.
         r.raise_for_status()
         body = r.json()
+        if body.get("already_stored") is True:
+            return None  # a result is stored and the broker adopted it: nothing to upload
         return UploadTarget(body["url"], dict(body["headers"]))
 
     def complete(self, lease: Lease, result_key: str) -> None:

@@ -26,8 +26,16 @@ class FakeBucket:
         self.heads: list[str] = []
         self.targets: list[tuple[str, str, int]] = []
         self.unavailable = False
+        self.credentials_down = False  # the STS or metadata server cannot be reached
+        self.presign_down = False  # signing itself raises
+
+    def check(self) -> None:
+        if self.credentials_down:
+            raise s3.BucketUnavailable("RefreshError")
 
     def get_url(self, key: str, expires: int = 600) -> str:
+        if self.presign_down:
+            raise s3.BucketUnavailable("RuntimeError")
         return f"https://fake.s3/get/{key}?exp={expires}"
 
     def put_target(self, key: str, sha256_hex: str, size: int, expires: int = 300):
@@ -205,8 +213,8 @@ def test_a_queued_or_finished_job_gets_no_upload_url(db_url, bucket):
     fake = {"job_id": "j0", "lease_token": "x" * 22}
     assert upload(w, fake).status_code == 409  # queued: nobody holds it
     lease = w.post("/lease", json=CAPS).json()
-    bucket.store(JOB)
     upload(w, lease)
+    bucket.store(JOB)
     assert complete(w, lease).status_code == 204
     assert upload(w, lease).status_code == 409  # done
     assert len(bucket.targets) == 1
@@ -263,7 +271,7 @@ def test_complete_accepts_a_stored_result_that_matches_the_declaration(leased, b
     upload(w, lease)
     bucket.store(JOB)
     assert complete(w, lease).status_code == 204
-    assert bucket.heads == [f"results/{key_for(JOB)}"]
+    assert bucket.heads == [f"results/{key_for(JOB)}"] * 2  # at /upload-url, then /complete
     assert open_store().get("j0")["state"] == "done"
 
 
@@ -329,6 +337,7 @@ def test_complete_without_any_upload_url_is_422_result_mismatch(leased, bucket):
 def test_a_wrong_result_key_is_refused_before_s3_is_asked(leased, bucket):
     w, lease = leased
     upload(w, lease)
+    bucket.heads.clear()  # /upload-url looked at S3 once; /complete must not
     r = complete(w, lease, result_key="f" * 64)
     assert (r.status_code, r.json()["code"]) == (422, "result_key_mismatch")
     assert bucket.heads == []
@@ -346,7 +355,7 @@ def test_a_repeated_complete_is_accepted_without_a_second_head(leased, bucket):
     bucket.store(JOB)
     assert complete(w, lease).status_code == 204
     assert complete(w, lease).status_code == 204  # retry after a lost response
-    assert len(bucket.heads) == 1
+    assert len(bucket.heads) == 2  # one at /upload-url, one at the first /complete
 
 
 def test_s3_trouble_on_complete_is_503_with_retry_after_and_changes_nothing(

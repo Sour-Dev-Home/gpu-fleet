@@ -9,6 +9,9 @@
                       each job names the model it is run with
   Each runner implements fixed prompt versions (echo: echo-v1, smoke: smoke-v1); a job with
   another prompt_version stops the worker (misconfiguration, ADR 0014 amendment).
+  FLEET_RESULTS_HOST  the results bucket's host, e.g. <bucket>.s3.amazonaws.com (us-east-1) or
+                      <bucket>.s3.<region>.amazonaws.com. Required for S3 mode: the worker refuses a
+                      presigned URL for any other host (SSRF), and FLEET_ALLOW_HTTP never loosens it.
   FLEET_ALLOW_HTTP    1 to allow plain http to a non-loopback host, e.g. the broker's
                       service name on a private Docker network. Never on a public network.
 
@@ -17,6 +20,7 @@ The same image runs locally, in Compose, on Cloud Run or on Kubernetes: only the
 
 import logging
 import os
+import re
 import signal
 import sys
 import threading
@@ -34,6 +38,7 @@ from .smoke import check_model_server, make_smoke
 from .url_store import UrlStore
 
 log = logging.getLogger("fleet_worker")
+_HOST = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$")  # a bare DNS name: no scheme, port, path
 
 
 def echo(job: Job, keepalive: Callable[[], None]) -> bytes:
@@ -82,6 +87,10 @@ class Config:
         self.model_url = env.get("FLEET_MODEL_URL", "")
         self.model = env.get("FLEET_MODEL", "qwen3:8b")
         self.allow_http = env.get("FLEET_ALLOW_HTTP") == "1"
+        # The only host presigned URLs may point at (url_store.check_url). Empty: none may.
+        self.results_host = env.get("FLEET_RESULTS_HOST", "").strip().lower()
+        if self.results_host and not _HOST.match(self.results_host):
+            raise SystemExit("fleet-worker: FLEET_RESULTS_HOST must be a bare host name")
 
     def __repr__(self) -> str:  # never print the token, even by accident
         return (
@@ -150,7 +159,7 @@ def build(config: Config) -> tuple[Worker, _Clients]:
         broker,
         DirStore(config.results_dir),
         runner,
-        url_store=lambda lease: UrlStore(broker, lease, transfers, allow_http=config.allow_http),
+        url_store=lambda lease: UrlStore(broker, lease, transfers, config.results_host),
     )
     return worker, _Clients(client, transfers)
 

@@ -45,8 +45,24 @@ on Google Cloud (ADR 0019/0021) and S3 is on AWS, so it needs AWS credentials wi
   as defense in depth, AND `accounts.google.com:oaud` equals `var.federation_audience` (default
   `fleet-aws-federation`). The IDs are identifiers, not credentials, so the variable is not `sensitive` (that
   would hide the whole trust policy in every plan); they come from `TF_VAR_` only to stay out of git. Permissions: `s3:GetObject` on `inputs/*` and
-  `results/*`, `s3:PutObject` on `results/*`, nothing else. **No `s3:ListBucket`**, so S3 answers 403 for a key that
-  does not exist; the broker reads 403 and 404 on HEAD as "missing" (any other error is a 503, retried).
+  `results/*`, `s3:PutObject` on `results/*`, and `s3:ListBucket` on the bucket (condition `s3:prefix` StringLike
+  `results/*`, `inputs/*`), nothing else. With ListBucket a missing key is a real 404: the broker reads **404 as "not
+  stored"** and **403 as a fault** (a wrong role or bucket policy), answered like any storage trouble. **Unverified:**
+  whether S3 evaluates the `s3:prefix` condition for HeadObject, which carries no prefix. If it does not, a HEAD of a
+  missing key stays 403 and every first upload would answer 503 `storage_unavailable`: check with the role right
+  after the apply (HEAD a key that does not exist) and drop the condition if so.
+- **A result that is already stored wins.** A model's output is not deterministic, so a job rerun after a crash
+  between PUT and `/complete` would otherwise meet its own earlier object (412, then `result_mismatch`, until
+  dead-letter). `/upload-url` therefore HEADs the key first: if an object exists, is within the cap and has a
+  checksum, the broker records THAT checksum and size as the job's declaration and answers
+  `{"already_stored": true}` with no URL; the worker skips the PUT and completes, and `/complete` passes. A 412 on a
+  PUT is handled the same way (ask again). The content-addressed key means any valid output for the same input,
+  model and prompt is acceptable (ADR 0007's idempotency). An object that exists but has no checksum or is over
+  the cap is not adopted; the job then fails at the PUT (412) and dead-letters, which needs a manual look.
+- **Storage trouble does not cost attempts.** Credentials are resolved (`get_frozen_credentials`) before `/lease`
+  claims, and at the start of `/upload-url`. An STS or metadata outage, a presign error, or a HEAD that cannot
+  answer is **503 `storage_unavailable`** with `Retry-After`, the exception's type only in the log. Without this a
+  claim would already have counted an attempt and a long outage would dead-letter the queue.
 - **Local mode is unchanged (Q79).** Without `FLEET_RESULTS_BUCKET`, leases have exactly the old fields and
   `/complete` does not look at S3. `/upload-url` answers **404** with code `presigned_urls_disabled`: 409 already
   means "lease lost" to a worker (ADR 0007) and would make it skip the job, whereas 404 says "this broker has no
@@ -57,19 +73,26 @@ on Google Cloud (ADR 0019/0021) and S3 is on AWS, so it needs AWS credentials wi
   that lease: it streams the input (and context) from the URL, hashes it, and raises `InputMismatch` unless it
   equals `input_sha256` (`context_sha256`). Nothing is run, stored or completed; the lease expires. This runs for
   every runner, the echo runner included, inside the heartbeat so a large download cannot lose the lease. It
-  uploads through `/upload-url` and a PUT with the returned headers; 412 (object already there from an earlier
-  attempt) counts as stored, because `/complete` compares the object with this attempt's declaration anyway.
+  uploads through `/upload-url` and a PUT with the returned headers (or skips it: see "already stored").
   `exists()` is always false (no presigned GET for results), so a retried job re-runs: the cost of keeping
   workers free of credentials. The downloads use a separate HTTP client without the broker's bearer token.
+- **The worker accepts presigned URLs only for its own bucket host (SSRF).** Every URL (input, context, upload) must
+  be `https`, on the default port, without userinfo, and its host must equal **`FLEET_RESULTS_HOST`**, exactly
+  (case-insensitive). The host is worker configuration, not something the broker sends: a compromised broker could
+  otherwise point workers at the cloud metadata server. The host is `<bucket>.s3.amazonaws.com` in us-east-1 (what
+  boto3 signs, checked locally) and `<bucket>.s3.<region>.amazonaws.com` elsewhere. Unset means every URL is
+  refused; `FLEET_ALLOW_HTTP` does not loosen it and loopback is no exception (a local S3 stand-in needs its own
+  decision). Chosen over a host in the lease because a value from the party being defended against protects nothing.
+- **Transient failures are retried while the lease is held.** Downloads (inside the heartbeat thread), the upload
+  and `/complete` (503, 429, timeouts) retry up to 3 times after 1, 2 and 4 seconds, each up to 50% longer, and the
+  Worker renews the lease between attempts. Only then does the loop's own backoff take over and the lease expire.
+  `TransientError` messages carry the exception type, never the URL (it is a credential).
 
 ## Consequences
 - The size cap is enforced at upload and again at completion (the config may change between).
 - If S3 honours none of the signed constraints, a worker could still store a bad object; `/complete` refuses to
   record it and nothing points to it. Quarantine for volunteers (security.md, before phase 10) builds on this.
-- If a retried job produces different bytes than an earlier attempt already stored and `If-None-Match` is honoured,
-  its upload gets 412 and `/complete` refuses on checksum; the job dead-letters after `max_attempts`. Rare
-  (needs a crash between PUT and complete plus a non-deterministic model); the probe result decides whether to drop
-  `If-None-Match`.
+- Workers need `FLEET_RESULTS_HOST` set (infra/aws/README.md) before they can use a lease that carries URLs.
 - Cloud Run needs `FLEET_RESULTS_BUCKET`, `FLEET_AWS_ROLE_ARN` (from `terraform output`), `FLEET_AWS_AUDIENCE` and
   `AWS_REGION`; that wiring is a follow-up PR (`infra/gcp` is not touched here).
 - **Accepted logging gap:** CloudTrail event history keeps `AssumeRoleWithWebIdentity` for 90 days at no cost.

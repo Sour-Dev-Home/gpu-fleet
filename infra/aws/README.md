@@ -54,6 +54,11 @@ terraform apply tfplan
 terraform output broker_role_arn   # FLEET_AWS_ROLE_ARN: contains the account ID, so never commit it
 ```
 
+Workers in S3 mode need `FLEET_RESULTS_HOST` = `<bucket>.s3.amazonaws.com` (us-east-1; `<bucket>.s3.<region>.amazonaws.com`
+elsewhere): they refuse presigned URLs for any other host. After the apply, check once with the role (not your
+login) that a HEAD of a key that does not exist answers 404, not 403 (ADR 0025, the `s3:prefix` condition on
+ListBucket is unverified for HeadObject).
+
 The Cloud Run wiring (`FLEET_RESULTS_BUCKET`, `FLEET_AWS_ROLE_ARN`, `FLEET_AWS_AUDIENCE`, `AWS_REGION`) is a
 follow-up change in `infra/gcp`; until then the broker runs in local mode.
 

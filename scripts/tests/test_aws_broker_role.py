@@ -102,9 +102,11 @@ def test_the_role_is_named_fleet_broker_and_lasts_an_hour():
 def test_the_permissions_are_exactly_get_on_inputs_and_results_and_put_on_results():
     p = permissions()
     stmts = statements(p)
-    assert len(stmts) == 2
+    assert len(stmts) == 3
     pairs = set()
     for s in stmts:
+        if "s3:ListBucket" in s:
+            continue  # the bucket-level statement has its own test below
         actions = re.search(r"actions\s*=\s*\[([^\]]*)\]", s).group(1)
         resources = re.search(r"resources\s*=\s*\[([^\]]*)\]", s).group(1)
         assert re.search(r'effect\s*=\s*"Allow"', s) or "effect" not in s  # Allow is the default
@@ -117,10 +119,21 @@ def test_the_permissions_are_exactly_get_on_inputs_and_results_and_put_on_result
     }
 
 
-def test_there_is_no_listing_delete_or_wildcard_action():
+def test_list_bucket_is_on_the_bucket_itself_and_only_for_our_two_prefixes():
+    # With it a missing key is a real 404; without it S3 says 403 and "missing" is a guess.
+    (stmt,) = [s for s in statements(permissions()) if "s3:ListBucket" in s]
+    assert re.search(r'actions\s*=\s*\["s3:ListBucket"\]', stmt)
+    assert re.search(r"resources\s*=\s*\[module\.results\.arn\]", stmt)
+    assert re.search(r'test\s*=\s*"StringLike"', stmt)
+    assert re.search(r'variable\s*=\s*"s3:prefix"', stmt)
+    assert re.search(r'values\s*=\s*\["results/\*",\s*"inputs/\*"\]', stmt)
+
+
+def test_there_is_no_delete_or_wildcard_action():
     p = permissions()
-    for forbidden in ("ListBucket", "DeleteObject", "s3:*", '"*"', "PutObjectAcl", "iam:"):
+    for forbidden in ("DeleteObject", "s3:*", '"*"', "PutObjectAcl", "iam:"):
         assert forbidden not in p
+    assert p.count("ListBucket") == 1
 
 
 def test_the_policy_is_attached_to_the_role():

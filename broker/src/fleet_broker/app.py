@@ -258,11 +258,16 @@ def create_app(
 
     @app.exception_handler(s3.BucketUnavailable)
     async def bucket_unavailable(request: Request, exc: s3.BucketUnavailable) -> Response:
-        # S3 could not answer /complete's HEAD: transient, so the worker retries (like a 503 from
-        # the database). The S3 error code only; nothing from the request.
+        # No credentials, no presign, or S3 would not answer (a 403 from HEAD included: loud, not
+        # "missing"): transient from the worker's side, so it retries (like a 503 from the
+        # database). The exception's type or S3 code only; nothing from the request.
         log.warning("results bucket unavailable on %s: %s", request.url.path, exc)
         metrics.busy()
-        return Response(status_code=503, headers={"Retry-After": "1"})
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "storage unavailable", "code": "storage_unavailable"},
+            headers={"Retry-After": "1"},
+        )
 
     # Bodies without a Content-Length (chunked) are counted as they arrive (bodylimit.py).
     app.add_middleware(BodyLimit, limit=MAX_BODY_BYTES)
@@ -314,6 +319,10 @@ def create_app(
     # built as models (validated) and sent as their dicts.
     @app.post("/lease", response_model=None, dependencies=worker)
     def lease(want: LeaseIn, s: Store):
+        if bucket is not None:
+            # Before the claim, which counts an attempt: an STS or metadata outage must not
+            # walk every job toward the dead-letter limit.
+            bucket.check()
         claim = s.claim(clock(), ttl_seconds, clearance, want.capabilities, want.models)
         if claim is None:
             return Response(status_code=204)
@@ -357,8 +366,9 @@ def create_app(
                 status_code=413,
                 content={"detail": "result too large", "code": "result_too_large"},
             )
+        bucket.check()  # credentials first: an outage is a 503 here, before anything is written
         try:
-            key = s.declare_result(up.job_id, up.lease_token, up.result_key, up.sha256, up.size)
+            key = s.holder_key(up.job_id, up.lease_token, up.result_key)
         except ResultKeyMismatch:
             return _refuse(
                 "result_key_mismatch", "result_key is not this job's content address", up
@@ -366,7 +376,22 @@ def create_app(
         if key is None:
             raise HTTPException(status_code=409, detail="lease lost")
         # The key is the one the broker recomputed from the job's row, not the caller's string.
-        target = bucket.put_target(s3.result_object_key(key), up.sha256, up.size)
+        object_key = s3.result_object_key(key)
+        # A result is already stored (an earlier attempt of this job, or a rerun after a crash):
+        # the first valid one wins. Results are content-addressed by input, model and prompt, so
+        # any valid output for them is acceptable (ADR 0007). Declare IT, so /complete passes, and
+        # sign nothing: a PUT would be refused (If-None-Match) or replace a good result.
+        stored = bucket.head(object_key)
+        if stored is not None and stored.checksum_sha256 and 0 < stored.size <= max_result_bytes:
+            declared = s.declare_result(
+                up.job_id, up.lease_token, s3.hex_digest(stored.checksum_sha256), stored.size
+            )
+            if not declared:
+                raise HTTPException(status_code=409, detail="lease lost")
+            return JSONResponse({"already_stored": True})
+        if not s.declare_result(up.job_id, up.lease_token, up.sha256, up.size):
+            raise HTTPException(status_code=409, detail="lease lost")
+        target = bucket.put_target(object_key, up.sha256, up.size)
         return UploadOut(url=target.url, headers=target.headers, expires_in=target.expires_in)
 
     @app.post("/heartbeat", dependencies=heartbeater)
