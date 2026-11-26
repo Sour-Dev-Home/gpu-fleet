@@ -287,7 +287,7 @@ Google Cloud console under Monitoring and are not exported.
 
 **Why a scheduler.** Cloud Run bills request-based: CPU only while a request runs, so the SDK's background exporter
 starves between requests. Cloud Scheduler calls `POST /telemetry/flush` once a minute with an OIDC ID token of the
-service account `fleet-scheduler` (audience = the broker's URL); the broker verifies the signature, audience, email
+service account `fleet-scheduler` (audience = the fixed custom audience `fleet-telemetry-flush`); the broker verifies the signature, audience, email
 and `email_verified`, collects the gauges once and force-flushes metrics, traces and logs (10 s cap). No admin token
 is stored in Scheduler. **Cost:** 43,200 requests a month (one a minute) against Cloud Run's 2M free requests, and
 Scheduler's 3 free jobs (this is one). The broker is not kept warm; the flush wakes it, which is the point.
@@ -322,10 +322,11 @@ needed. With it true and either value missing, the plan fails with a clear messa
 **Verify:** `gcloud scheduler jobs run fleet-telemetry-flush --location us-central1`, then
 `gcloud run services logs read fleet-broker --region us-central1` (a flush is a `POST /telemetry/flush` with 204) and
 Grafana Explore for `service_name="fleet-broker"`. The deployer needs Cloud Scheduler Admin and Service Account
-User on `fleet-scheduler`. **UNVERIFIED until the first apply:** that Cloud Scheduler's own service agent can mint the
-token for `fleet-scheduler` with no extra grant (the docs say yes for same-project accounts); that the broker's
-predicted URL equals the real one (the `broker_url_matches_the_service` check warns if not); that Grafana's gateway
-accepts the exporter's gzip/protobuf bodies on the free tier.
+User on `fleet-scheduler`. The Scheduler service agent needs no `tokenCreator` grant: it gets
+`roles/cloudscheduler.serviceAgent` automatically when the API is enabled, and that role can mint tokens for
+same-project service accounts. **UNVERIFIED until the first apply:** that Grafana's gateway accepts the exporter's
+gzip/protobuf bodies on the free tier, and that Cloud Run accepts the `fleet-telemetry-flush` custom audience as
+written (the provider validates the field; the token path itself has not run).
 
 **IAM and the kill switch.** `fleet-scheduler` holds `roles/run.invoker` on the broker service as its own additive
 member (`scheduler_invokes`), so flushes still work while the kill switch has removed `allUsers`: the telemetry that

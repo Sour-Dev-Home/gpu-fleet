@@ -38,12 +38,41 @@ def test_alloy_collects_exactly_the_five_windows_collectors():
     assert re.findall(r'"([a-z_]+)"', m.group(1)) == COLLECTORS
 
 
-def test_pipeline_is_exporter_scrape_receiver_resource_otlphttp():
+# Every component the config may use. Each one was confirmed to have a reference page under
+# grafana.com/docs/alloy/latest/reference/components/ on 2026-11-26. `otelcol.processor.resource` is NOT here:
+# its page is a 404 (it does not exist in Alloy; use otelcol.processor.transform).
+KNOWN_COMPONENTS = {
+    "prometheus.exporter.windows",
+    "prometheus.scrape",
+    "otelcol.receiver.prometheus",
+    "otelcol.processor.transform",
+    "otelcol.auth.basic",
+    "otelcol.exporter.otlphttp",
+}
+
+
+def test_only_documented_components_are_used():
+    cfg = strip_alloy(CONFIG.read_text(encoding="utf-8"))
+    declared = set(re.findall(r'(?m)^([a-z]+(?:\.[a-z0-9_]+)+)\s+"', cfg))
+    # references such as otelcol.processor.transform.pc.input or prometheus.scrape.pc.receiver
+    referenced = set(
+        re.findall(
+            r"\b((?:otelcol|prometheus|local|discovery|loki)\.[a-z]+\.[a-z0-9_]+)\.\w+\.", cfg
+        )
+    )
+    assert declared, "no components found: the regex is broken"
+    assert declared <= KNOWN_COMPONENTS, f"unknown components: {declared - KNOWN_COMPONENTS}"
+    assert referenced <= KNOWN_COMPONENTS, f"unknown references: {referenced - KNOWN_COMPONENTS}"
+    assert "otelcol.processor.resource" not in cfg
+
+
+def test_pipeline_is_exporter_scrape_receiver_transform_otlphttp():
     cfg = strip_alloy(CONFIG.read_text(encoding="utf-8"))
     for component in (
         "prometheus.exporter.windows",
         "prometheus.scrape",
         "otelcol.receiver.prometheus",
+        "otelcol.processor.transform",
         "otelcol.exporter.otlphttp",
         "otelcol.auth.basic",
     ):
@@ -55,11 +84,16 @@ def test_pipeline_is_exporter_scrape_receiver_resource_otlphttp():
 
 def test_the_token_comes_from_a_secret_file_and_nothing_secret_is_literal():
     cfg = strip_alloy(CONFIG.read_text(encoding="utf-8"))
-    f = re.search(r'local\.file\s+"(\w+)"\s*\{(.*?)\n\}', cfg, re.DOTALL)
-    assert f, "the token must be read with local.file"
-    assert re.search(r"is_secret\s*=\s*true", f.group(2))
-    assert re.search(r"filename\s*=\s*sys\.env\(", f.group(2))
-    assert re.search(rf"password\s*=\s*local\.file\.{f.group(1)}\.content", cfg)
+    m = re.search(r'otelcol\.auth\.basic\s+"\w+"\s*\{(.*?)\n\}', cfg, re.DOTALL)
+    assert m
+    block = m.group(1)
+    # the top-level username/password are deprecated: both live in a client_auth block, the token as a file
+    assert re.search(r"client_auth\s*\{", block)
+    top = re.sub(r"client_auth\s*\{.*?\}", "", block, flags=re.DOTALL)
+    assert not re.search(r"\b(username|password)\s*=", top), "deprecated top-level credentials"
+    assert re.search(r'password_file\s*=\s*sys\.env\("FLEET_GRAFANA_TOKEN_FILE"\)', block)
+    assert not re.search(r"\bpassword\s*=", block)
+    assert "local.file" not in cfg
     # no password, token or key written in the file
     assert not re.search(r'(?i)(password|token|secret|api_key)\s*=\s*"', cfg)
     assert not re.search(r"glc_|glsa_|Bearer |Basic ", cfg)
@@ -75,12 +109,18 @@ def test_account_identifiers_come_from_environment_variables():
 
 def test_every_series_carries_the_install_id_as_service_instance_id():
     cfg = strip_alloy(CONFIG.read_text(encoding="utf-8"))
-    m = re.search(r'otelcol\.processor\.resource\s+"\w+"\s*\{(.*?)\n\}', cfg, re.DOTALL)
+    m = re.search(r'otelcol\.processor\.transform\s+"\w+"\s*\{(.*?)\n\}', cfg, re.DOTALL)
     assert m
-    assert re.search(r'key\s*=\s*"service\.instance\.id"', m.group(1))
-    assert re.search(r'value\s*=\s*sys\.env\("FLEET_INSTALL_ID"\)', m.group(1))
-    # the scrape forwards through the receiver, whose output goes to the resource processor, then out
-    assert re.search(r"metrics\s*=\s*\[otelcol\.processor\.resource\.\w+\.input\]", cfg)
+    body = m.group(1)
+    assert re.search(r'metric_statements\s*\{[^}]*context\s*=\s*"resource"', body, re.DOTALL)
+    # Alloy string concatenation injects the environment value into the OTTL statement
+    assert re.search(
+        r'`set\(attributes\["service\.instance\.id"\], "`\s*\+\s*sys\.env\("FLEET_INSTALL_ID"\)\s*\+\s*`"\)`',
+        body,
+    )
+    assert re.search(r'`set\(attributes\["service\.name"\], "fleet-pc"\)`', body)
+    # the scrape forwards through the receiver, whose output goes to the transform processor, then out
+    assert re.search(r"metrics\s*=\s*\[otelcol\.processor\.transform\.\w+\.input\]", cfg)
     assert re.search(r"metrics\s*=\s*\[otelcol\.exporter\.otlphttp\.\w+\.input\]", cfg)
 
 
@@ -209,3 +249,56 @@ def test_docs_mention_the_installer_and_the_vault_names():
     ):
         assert name in readme, name
     assert "UNVERIFIED" in readme
+
+
+def test_service_runs_a_protected_copy_of_the_config_not_the_repo_file():
+    code = strip_ps(SETUP.read_text(encoding="utf-8"))
+    assert re.search(r"Copy-Item[^\n]*\$config\b[^\n]*\$configCopy", code) or "Copy-Item" in code
+    assert re.search(r"\$configCopy\s*=\s*Join-Path\s+\$dir\s+'config\.alloy'", code)
+    # the `run` argument is the copy in the protected directory, never the repo path
+    assert re.search(r"\$arguments\s*=\s*@\('run',\s*\$configCopy\)", code)
+    assert not re.search(r"@\('run',\s*\$config\)", code)
+    # the copy happens after the directory ACL is set, so it is never briefly user-writable
+    assert code.index("Set-Acl") < code.index("Copy-Item")
+
+
+def test_setup_takes_ownership_and_refuses_reparse_points():
+    code = strip_ps(SETUP.read_text(encoding="utf-8"))
+    assert "ReparsePoint" in code
+    assert re.search(r"(?i)throw[^\n]*(reparse|symbolic|junction|link)", code)
+    assert re.search(r"\$acl\.SetOwner\(\$admins\)", code)
+    assert code.index("SetOwner") < code.index("Set-Acl")
+    # the reparse check comes before any ACL is changed or the token written
+    assert code.index("ReparsePoint") < code.index("SetOwner")
+    assert code.index("ReparsePoint") < code.index("WriteAllText")
+
+
+def test_readme_validates_the_copied_config_before_restart():
+    readme = (ROOT / "observability/alloy/README.md").read_text(encoding="utf-8")
+    assert re.search(r"alloy validate\s+\S*config\.alloy", readme)
+    assert "ProgramData" in readme
+    assert "from the repo" not in readme.lower() or "copy" in readme.lower()
+    assert "observability/alloy/config.alloy" in readme  # the source is still named
+
+
+def test_env_script_restores_preexisting_otlp_variables():
+    code = strip_ps(ENVSCRIPT.read_text(encoding="utf-8"))
+    final = code[code.index("finally") :]
+    for name in ("OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS"):
+        # saved before being overwritten, restored (not just removed) in finally
+        assert re.search(
+            rf"\$saved\w*\s*=\s*\[Environment\]::GetEnvironmentVariable\(\"{name}\"|\$saved\w*\s*=\s*\$env:{name}",
+            code,
+        ), name
+        assert re.search(
+            rf"(?s)\$saved\w*.*Set-Item\s+\"?env:{name}|Set-Item\s+\"?env:{name}[^\n]*\$saved",
+            final,
+        ), name
+        assert code.index("saved") < code.index(f'Set-Item "env:{name}"')
+    assert "$null -ne $saved" in final or "$null -eq $saved" in final
+
+
+def test_env_script_requires_a_numeric_instance_id():
+    code = strip_ps(ENVSCRIPT.read_text(encoding="utf-8"))
+    assert re.search(r"\$instanceId\s+-notmatch\s+'\^\[0-9\]\+\$'", code)
+    assert code.index("-notmatch '^[0-9]+$'") < code.index("$pair")

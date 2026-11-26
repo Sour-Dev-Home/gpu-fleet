@@ -74,6 +74,17 @@ def test_otlp_logs_keep_only_the_allowed_extras():
     assert record.log_record.body == "done"
 
 
+def test_otel_handler_returns_a_handler_with_a_working_force_flush():
+    from opentelemetry.sdk._logs.export import InMemoryLogRecordExporter
+
+    handler, shutdown = jsonlog.otel_handler("fleet-worker", exporter=InMemoryLogRecordExporter())
+    try:
+        assert handler.force_flush(1_000) is True
+        assert type(handler.force_flush.__self__).__name__ == "LoggerProvider"
+    finally:
+        shutdown()
+
+
 def test_setup_replaces_earlier_handlers(capture):
     # uvicorn installs its own plain-text handlers; after setup they forward to the JSON one.
     access = logging.getLogger("uvicorn.access")

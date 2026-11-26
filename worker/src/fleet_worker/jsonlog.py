@@ -14,6 +14,10 @@ from datetime import UTC, datetime
 
 # Extra fields a log call may attach (`log.info("...", extra={"job_id": ...})`). Anything else is
 # dropped: logs carry IDs and labels, never input content, tokens or URLs with signatures.
+# One OTLP/HTTP request may take this long (the SDK default is 10 s). The broker's POST /telemetry/flush has a
+# 10 s budget for metrics, traces and logs together, so a hung endpoint must not eat all of it (ADR 0027).
+EXPORT_TIMEOUT_SECONDS = 5.0
+
 ALLOWED_EXTRAS = frozenset(
     {"job_id", "attempt", "data_class", "model", "prompt_version", "status", "method", "path"}
 )
@@ -81,7 +85,9 @@ def otel_handler(service_name: str, base_url: str | None = None, exporter=None):
         from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 
         provider.add_log_record_processor(
-            BatchLogRecordProcessor(OTLPLogExporter(endpoint=base_url + "/v1/logs"))
+            BatchLogRecordProcessor(
+                OTLPLogExporter(endpoint=base_url + "/v1/logs", timeout=EXPORT_TIMEOUT_SECONDS)
+            )
         )
     else:
         provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))

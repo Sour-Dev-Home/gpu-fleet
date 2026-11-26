@@ -33,6 +33,9 @@ resource "google_cloud_run_v2_service" "broker" {
   ingress             = "INGRESS_TRAFFIC_ALL"
   deletion_protection = true
 
+  # Audience of the Scheduler's flush token (grafana.tf, local.flush_audience): a fixed name instead of the URL.
+  custom_audiences = [local.flush_audience]
+
   template {
     service_account = google_service_account.broker.email
 

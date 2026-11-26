@@ -21,14 +21,23 @@ One token per source, 90-day expiry; rotation is in `infra/gcp/fleet/README.md` 
 1. Install once (Windows installer; the service is named `Alloy` and runs as LocalSystem):
    `winget install GrafanaLabs.Alloy`, or the installer from grafana.com's Alloy download page.
 2. In an elevated PowerShell at the repo root: `./scripts/setup-alloy.ps1`. It writes the token to
-   `%ProgramData%\fleet\alloy\grafana-token` (SYSTEM and Administrators only, inheritance off), sets the service's
-   environment, points `run` at `observability/alloy/config.alloy` and restarts the service. Re-run it after
-   rotating the token; it is idempotent and never prints the token. The environment holds the endpoint, the instance
-   ID, the token file's path and the install ID, not the token.
-3. Check: the service is Running (`Get-Service Alloy`); Alloy's own UI at http://127.0.0.1:12345 shows the components
+   `%ProgramData%\fleet\alloy\grafana-token` (SYSTEM and Administrators only, inheritance off, owner Administrators;
+   it refuses a symlink or junction in that place), copies `observability/alloy/config.alloy` to
+   `%ProgramData%\fleet\alloy\config.alloy` in the same protected directory, sets the service's environment, points
+   `run` at the COPY and restarts the service. The service runs as SYSTEM, so it must never run a file a user can
+   edit. Re-run it after rotating the token or editing the config (it refreshes the copy); it is idempotent and never
+   prints the token. The environment holds the endpoint, the instance ID, the token file's path and the install ID,
+   not the token.
+3. Validate the copy before trusting the restart: in an elevated PowerShell,
+   `alloy validate "$env:ProgramData\fleet\alloy\config.alloy"` (checks syntax and component arguments without
+   starting Alloy; `alloy fmt` only checks formatting). If it complains about an empty `sys.env` value, that is
+   the shell, not the service (the variables live in the service's registry entry); then restart the service and
+   read its log instead.
+4. Check: the service is Running (`Get-Service Alloy`); Alloy's own UI at http://127.0.0.1:12345 shows the components
    healthy; Grafana Explore shows `windows_cpu_time_total` with `service_name="fleet-pc"` within a couple of minutes.
 
-The config file lives in the repo, so the service reads it from there: moving or deleting the checkout stops it.
+The service reads the copy under `%ProgramData%`, so moving or deleting the checkout does not stop it; edits to the
+repo file take effect only after re-running `setup-alloy.ps1`.
 
 ## The worker (one process at a time)
 
@@ -47,5 +56,5 @@ pip install "fleet-worker[otel]"        # the opt-in extra (ADR 0018)
   differ, `setup-alloy.ps1` stops with a message before changing anything it cannot find.
 - The `gpu` collector of `prometheus.exporter.windows` needs a Windows exporter and Alloy release that include it;
   an older one refuses the config at startup (the Alloy service log says which collector).
-- Whether `otelcol.receiver.prometheus` plus the resource processor keeps `service.name = fleet-pc` on the free tier's
+- Whether `otelcol.receiver.prometheus` plus the transform processor keeps `service.name = fleet-pc` on the free tier's
   OTLP gateway unchanged. Check the first series in Explore.

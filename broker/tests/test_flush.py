@@ -17,7 +17,7 @@ from google.auth import crypt, jwt
 from tokens import ADMIN, WORKER
 
 ALL = {"footage", "derived", "open"}
-AUDIENCE = "https://fleet-broker-000000000000.example.run.app"
+AUDIENCE = "fleet-telemetry-flush"
 SCHEDULER = "fleet-scheduler@example-project.iam.gserviceaccount.com"
 
 
@@ -244,25 +244,13 @@ def test_grafana_header_is_basic_auth_in_the_percent_20_form():
 
 
 def test_the_exporter_decodes_the_header_to_a_real_basic_auth_value():
-    from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+    # The SDK's own public parser, the one the exporters use for this variable.
+    from opentelemetry.util.re import parse_env_headers
 
     env = {"FLEET_GRAFANA_INSTANCE_ID": "123456", "FLEET_GRAFANA_TOKEN": "tok"}
     assert telemetry.apply_grafana_auth(env)
-    import os
-
-    old = os.environ.get("OTEL_EXPORTER_OTLP_HEADERS")
-    os.environ["OTEL_EXPORTER_OTLP_HEADERS"] = env["OTEL_EXPORTER_OTLP_HEADERS"]
-    try:
-        exporter = OTLPMetricExporter(endpoint="https://otlp.example.net/otlp/v1/metrics")
-        sent = exporter._client._headers[
-            "authorization"
-        ]  # private: the SDK is pinned by the lockfile
-    finally:
-        if old is None:
-            del os.environ["OTEL_EXPORTER_OTLP_HEADERS"]
-        else:
-            os.environ["OTEL_EXPORTER_OTLP_HEADERS"] = old
-    assert sent == "Basic " + base64.b64encode(b"123456:tok").decode()
+    sent = parse_env_headers(env["OTEL_EXPORTER_OTLP_HEADERS"])
+    assert sent == {"authorization": "Basic " + base64.b64encode(b"123456:tok").decode()}
 
 
 def test_grafana_auth_is_off_without_a_token_and_refuses_half_a_setup(caplog):
@@ -361,3 +349,159 @@ def test_from_env_sets_the_header_and_enables_the_scheduler_identity(monkeypatch
     finally:
         app.state.pool.close()
         monkeypatch.delenv("OTEL_EXPORTER_OTLP_HEADERS", raising=False)
+
+
+# --- B1: the bare issuer ------------------------------------------------------------------------------------
+
+
+def test_a_token_with_the_bare_issuer_is_accepted():
+    # Google's ID tokens carry either "accounts.google.com" or "https://accounts.google.com".
+    v = OidcVerifier(AUDIENCE, SCHEDULER, certs=lambda: CERTS)
+    assert v(id_token(iss="accounts.google.com")) is True
+    assert v(id_token(iss="https://accounts.google.com")) is True
+    assert v(id_token(iss="accounts.google.com.evil.example")) is False
+
+
+# --- B2: the real wiring the flush endpoint relies on -----------------------------------------------------------
+
+
+def test_otel_handler_returns_a_handler_with_a_working_force_flush():
+    from fleet_broker import jsonlog
+    from opentelemetry.sdk._logs.export import InMemoryLogRecordExporter
+
+    handler, shutdown = jsonlog.otel_handler("fleet-test", exporter=InMemoryLogRecordExporter())
+    try:
+        assert handler.force_flush(1_000) is True
+        # bound to the handler's real LoggerProvider, not a stand-in
+        assert type(handler.force_flush.__self__).__name__ == "LoggerProvider"
+    finally:
+        shutdown()
+
+
+def test_trace_app_exposes_its_tracer_provider_for_the_flush():
+    from fastapi import FastAPI
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    app = FastAPI()
+    env = {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:1"}
+    shutdown = telemetry.trace_app(
+        app, env, exporter=InMemorySpanExporter(), worker_tokens=(WORKER,)
+    )
+    try:
+        provider = app.state.tracer_provider
+        assert isinstance(provider, TracerProvider)
+        assert provider.force_flush(1_000) is True
+    finally:
+        shutdown()
+
+
+# --- B3: the export is bounded, so the 10 s flush budget is real ---------------------------------------------
+
+
+class _Hang:
+    """A local OTLP endpoint that accepts requests and never answers."""
+
+    def __enter__(self):
+        import http.server
+        import threading
+
+        release = self.release = threading.Event()
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                release.wait(30)
+
+            def log_message(self, *a):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+        return self
+
+    def __exit__(self, *exc):
+        self.release.set()
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def _elapsed(fn) -> float:
+    start = time.monotonic()
+    fn()
+    return time.monotonic() - start
+
+
+BOUND = 3.0  # the patched timeout is 0.5 s; a missing timeout would wait for the SDK's 10 s default
+
+
+def test_the_default_export_timeout_is_five_seconds():
+    from fleet_broker import jsonlog
+
+    assert jsonlog.EXPORT_TIMEOUT_SECONDS == 5.0
+
+
+def test_a_hung_endpoint_cannot_hold_the_span_flush(monkeypatch):
+    from fastapi import FastAPI
+    from fleet_broker import jsonlog
+
+    monkeypatch.setattr(jsonlog, "EXPORT_TIMEOUT_SECONDS", 0.5)
+    with _Hang() as srv:
+        app = FastAPI()
+        shutdown = telemetry.trace_app(
+            app, {"OTEL_EXPORTER_OTLP_ENDPOINT": srv.url}, worker_tokens=(WORKER,)
+        )
+        provider = app.state.tracer_provider
+        # ParentBased(ALWAYS_OFF): only a span under a sampled remote parent (the worker's) is recorded.
+        from opentelemetry import trace
+
+        parent = trace.set_span_in_context(
+            trace.NonRecordingSpan(
+                trace.SpanContext(
+                    trace_id=0x1234,
+                    span_id=0x5678,
+                    is_remote=True,
+                    trace_flags=trace.TraceFlags(trace.TraceFlags.SAMPLED),
+                )
+            )
+        )
+        provider.get_tracer("t").start_span("s", context=parent).end()
+        try:
+            assert _elapsed(lambda: provider.force_flush(30_000)) < BOUND
+        finally:
+            srv.release.set()
+            shutdown()
+
+
+def test_a_hung_endpoint_cannot_hold_the_metrics_flush(monkeypatch):
+    from fleet_broker import jsonlog
+
+    class Store:
+        def stats(self, now):
+            return _empty_stats()
+
+    monkeypatch.setattr(jsonlog, "EXPORT_TIMEOUT_SECONDS", 0.5)
+    with _Hang() as srv:
+        m = telemetry.setup(Store(), time.monotonic, {"OTEL_EXPORTER_OTLP_ENDPOINT": srv.url})
+        assert isinstance(m, telemetry.OtelMetrics)
+        try:
+            assert _elapsed(lambda: m.flush(30_000)) < BOUND
+        finally:
+            srv.release.set()
+            m.provider.shutdown()  # stop the reader's thread before the server goes away
+
+
+def test_a_hung_endpoint_cannot_hold_the_log_flush(monkeypatch):
+    from fleet_broker import jsonlog
+
+    monkeypatch.setattr(jsonlog, "EXPORT_TIMEOUT_SECONDS", 0.5)
+    with _Hang() as srv:
+        handler, shutdown = jsonlog.otel_handler("fleet-test", srv.url)
+        rec = logging.LogRecord("fleet_broker", logging.INFO, __file__, 1, "hello", None, None)
+        handler.emit(rec)
+        try:
+            assert _elapsed(lambda: handler.force_flush(30_000)) < BOUND
+        finally:
+            srv.release.set()
+            shutdown()

@@ -361,7 +361,9 @@ def trace_app(
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
         base = check_endpoint(env)
-        otlp = _scrubbing(OTLPSpanExporter(endpoint=base + "/v1/traces"))
+        otlp = _scrubbing(
+            OTLPSpanExporter(endpoint=base + "/v1/traces", timeout=jsonlog.EXPORT_TIMEOUT_SECONDS)
+        )
         provider.add_span_processor(BatchSpanProcessor(otlp))
     else:  # tests: the same scrubbing, so they check what really leaves
         provider.add_span_processor(SimpleSpanProcessor(_scrubbing(exporter)))
@@ -425,7 +427,9 @@ def setup(
     )
     # The endpoint comes from `env` (the HTTP exporter adds the signal path), not from the
     # exporter's own os.environ lookup, so what setup checked is what gets used.
-    exporter = OTLPMetricExporter(endpoint=metrics_endpoint(env))
+    exporter = OTLPMetricExporter(
+        endpoint=metrics_endpoint(env), timeout=jsonlog.EXPORT_TIMEOUT_SECONDS
+    )
     provider = MeterProvider(
         metric_readers=[PeriodicExportingMetricReader(exporter)], resource=resource
     )

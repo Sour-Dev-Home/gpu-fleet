@@ -14,10 +14,14 @@ param([Parameter(ValueFromRemainingArguments)][string[]]$Command)
 $ErrorActionPreference = 'Stop'
 if ($Command.Count -and $Command[0] -eq '--') { $Command = $Command[1..($Command.Count - 1)] }
 if (-not $Command.Count) { throw 'Usage: grafana-env.ps1 -- <command> [args]' }
+# Whatever the caller already had is put back afterwards (null = was not set), not just removed.
+$savedEndpoint = $env:OTEL_EXPORTER_OTLP_ENDPOINT
+$savedHeaders = $env:OTEL_EXPORTER_OTLP_HEADERS
 try {
   $url = Get-Secret -Name FLEET_GRAFANA_OTLP_URL -Vault fleet -AsPlainText
   $instanceId = Get-Secret -Name FLEET_GRAFANA_INSTANCE_ID -Vault fleet -AsPlainText
   if ($url -notmatch '^https://') { throw 'FLEET_GRAFANA_OTLP_URL must be an https:// URL.' }
+  if ($instanceId -notmatch '^[0-9]+$') { throw 'FLEET_GRAFANA_INSTANCE_ID must be the numeric instance ID.' }
   $token = Get-Secret -Name FLEET_GRAFANA_TOKEN_PC_WORKER -Vault fleet -AsPlainText
   $pair = "${instanceId}:$token"
   $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($pair))
@@ -28,6 +32,8 @@ try {
   & $Command[0] @($Command | Select-Object -Skip 1)
   exit $LASTEXITCODE
 } finally {
-  Remove-Item "env:OTEL_EXPORTER_OTLP_ENDPOINT" -ErrorAction SilentlyContinue
-  Remove-Item "env:OTEL_EXPORTER_OTLP_HEADERS" -ErrorAction SilentlyContinue
+  if ($null -ne $savedEndpoint) { Set-Item "env:OTEL_EXPORTER_OTLP_ENDPOINT" $savedEndpoint }
+  else { Remove-Item "env:OTEL_EXPORTER_OTLP_ENDPOINT" -ErrorAction SilentlyContinue }
+  if ($null -ne $savedHeaders) { Set-Item "env:OTEL_EXPORTER_OTLP_HEADERS" $savedHeaders }
+  else { Remove-Item "env:OTEL_EXPORTER_OTLP_HEADERS" -ErrorAction SilentlyContinue }
 }

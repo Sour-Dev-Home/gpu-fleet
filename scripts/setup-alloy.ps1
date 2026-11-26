@@ -15,7 +15,8 @@ It then
      (inheritance off; the ACL is set on the EMPTY file before the token goes in),
   2. sets the Alloy service's environment (HKLM\SOFTWARE\GrafanaLabs\Alloy, value Environment): the URL, the
      instance ID, the token FILE's path and the worker's install ID,
-  3. keeps the service's other arguments (the storage path) and points `run` at this repo's config,
+  3. copies the repo's config to %ProgramData%\fleet\alloy\config.alloy (the service runs as SYSTEM, so it must not
+     run a user-writable file), keeps the service's other arguments (the storage path) and points `run` at the copy,
   4. restarts the service.
 The registry holds an identifier of the account (instance ID) and the endpoint, not the token.
 #>
@@ -53,11 +54,25 @@ if ($instanceId -notmatch '^[0-9]+$') { throw 'FLEET_GRAFANA_INSTANCE_ID must be
 $dir = Join-Path $env:ProgramData 'fleet\alloy'
 New-Item -ItemType Directory -Force $dir | Out-Null
 $tokenFile = Join-Path $dir 'grafana-token'
+$configCopy = Join-Path $dir 'config.alloy'
+# A symlink or junction planted where we write would redirect the token (or the ACL change) elsewhere.
+function Assert-NotReparsePoint([string]$Path) {
+  if (Test-Path -LiteralPath $Path) {
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+      throw "$Path is a reparse point (symbolic link or junction); refusing to use it."
+    }
+  }
+}
+Assert-NotReparsePoint $dir
 if (-not (Test-Path $tokenFile)) { New-Item -ItemType File $tokenFile | Out-Null }
+Assert-NotReparsePoint $tokenFile
+Assert-NotReparsePoint $configCopy
 $system = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
 $admins = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
 foreach ($path in @($dir, $tokenFile)) {
   $acl = Get-Acl $path
+  $acl.SetOwner($admins)                        # a pre-planted object may be owned by a user, who could undo the ACL
   $acl.SetAccessRuleProtection($true, $false)   # inheritance off, inherited rules dropped
   foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRule($rule) }
   $flags = if ((Get-Item $path).PSIsContainer) { 'ContainerInherit,ObjectInherit' } else { 'None' }
@@ -66,6 +81,11 @@ foreach ($path in @($dir, $tokenFile)) {
   }
   Set-Acl -Path $path -AclObject $acl
 }
+# The SYSTEM service must not run a file a user can edit: it runs this COPY, in the protected directory
+# (the ACL above is already in place). Re-running this script refreshes the copy from the repo file.
+# A pre-existing copy is deleted first, so the new file takes the directory's ACL and owner.
+Remove-Item -LiteralPath $configCopy -Force -ErrorAction SilentlyContinue
+Copy-Item -LiteralPath $config -Destination $configCopy
 $token = Get-Secret -Name FLEET_GRAFANA_TOKEN_PC_ALLOY -Vault fleet -AsPlainText
 # No trailing newline and no BOM: Alloy would send both as part of the password.
 [IO.File]::WriteAllText($tokenFile, $token, (New-Object System.Text.UTF8Encoding($false)))
@@ -81,10 +101,10 @@ $environment = @(
 $current = Get-ItemProperty -Path $key
 # Keep every existing flag (--storage.path and friends); replace only the config file.
 $flagsKept = @($current.Arguments | Where-Object { $_ -like '--*' })
-$arguments = @('run', $config) + $flagsKept
+$arguments = @('run', $configCopy) + $flagsKept
 Set-ItemProperty -Path $key -Name Environment -Value $environment -Type MultiString
 Set-ItemProperty -Path $key -Name Arguments -Value $arguments -Type MultiString
 
 # 4. Restart so the new environment, arguments and token are read.
 Restart-Service -Name $ServiceName
-Write-Output "Alloy configured: config $config, $($environment.Count) environment entries, token file protected."
+Write-Output "Alloy configured: config copy $configCopy, $($environment.Count) environment entries, token file protected."

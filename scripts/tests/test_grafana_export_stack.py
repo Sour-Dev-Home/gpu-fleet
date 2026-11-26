@@ -106,21 +106,36 @@ def test_the_scheduler_job_uses_an_oidc_token_for_the_dedicated_account():
     b = res("google_cloud_scheduler_job", "telemetry_flush")
     o = re.search(r"oidc_token\s*\{(.*?)\}", b, re.DOTALL).group(1)
     assert "service_account_email = google_service_account.scheduler.email" in o
-    assert "audience              = local.broker_url" in o
     sa = res("google_service_account", "scheduler")
     assert 'account_id   = "fleet-scheduler"' in sa
 
 
-def test_audience_and_email_in_the_broker_env_are_the_ones_the_job_signs_with():
+def _resolve(expr: str, g: str) -> str:
+    """A literal string, or a local.NAME resolved to its literal."""
+    expr = expr.strip()
+    if expr.startswith("local."):
+        name = expr.removeprefix("local.")
+        expr = re.search(rf"(?m)^\s*{name}\s*=\s*(.+)$", g).group(1).strip()
+    assert expr.startswith('"') and expr.endswith('"'), expr
+    return expr[1:-1]
+
+
+def test_one_audience_string_on_the_service_the_job_and_the_broker_env():
     g = code("grafana.tf")
-    assert re.search(r"FLEET_FLUSH_OIDC_AUDIENCE\s*=\s*local\.broker_url", g)
+    job = res("google_cloud_scheduler_job", "telemetry_flush")
+    sched = re.search(r"audience\s*=\s*(.+)", job).group(1)
+    env = re.search(r"FLEET_FLUSH_OIDC_AUDIENCE\s*=\s*(.+)", g).group(1)
+    svc = block("cloudrun.tf", 'resource "google_cloud_run_v2_service" "broker"')
+    custom = re.search(r"custom_audiences\s*=\s*\[(.+?)\]", svc).group(1)
+    values = {_resolve(sched, g), _resolve(env, g), _resolve(custom, g)}
+    assert values == {"fleet-telemetry-flush"}, values
     assert re.search(r"FLEET_FLUSH_OIDC_EMAIL\s*=\s*google_service_account\.scheduler\.email", g)
-    assert re.search(
-        r'broker_url\s*=\s*"https://fleet-broker-\$\{data\.google_project\.this\.number\}\.\$\{var\.region\}\.run\.app"',
-        g,
-    )
-    assert 'check "broker_url_matches_the_service"' in g
-    assert "google_cloud_run_v2_service.broker[0].uri == local.broker_url" in g
+
+
+def test_the_audience_is_not_a_predicted_url():
+    g = code("grafana.tf")
+    assert "broker_url" not in g and "run.app" not in g
+    assert 'check "' not in g
 
 
 def test_scheduler_keeps_invoker_on_the_broker_service_only_so_flushes_survive_the_kill_switch():

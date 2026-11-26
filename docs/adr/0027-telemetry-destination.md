@@ -26,9 +26,13 @@ the SDK's background exporter between requests.
   traces and logs (10 s cap in total). Cloud Scheduler calls it every minute: 43,200 requests a month against the
   2M free tier, and Scheduler's 3 free jobs. Request-based billing stays; `cpu_idle = false` (always-on CPU) would
   cost far more than the free tier absorbs. A minute is also the metrics' resolution.
-- **Flush auth.** EITHER the admin bearer token OR a Google-signed ID token whose audience is the service URL, whose
-  issuer is Google, and whose email is the scheduler's service account with `email_verified` true (google-auth,
-  certificates cached an hour). No admin token is stored in Scheduler.
+- **Flush auth.** EITHER the admin bearer token OR a Google-signed ID token whose audience is the fixed string
+  `fleet-telemetry-flush`, whose issuer is Google, and whose email is the scheduler's service account with
+  `email_verified` true (google-auth, certificates cached an hour). No admin token is stored in Scheduler. The
+  string is a Cloud Run custom audience on the broker service and is the Scheduler's token audience and the
+  broker's `FLEET_FLUSH_OIDC_AUDIENCE`, so nothing depends on a predicted `run.app` URL. Why a custom audience:
+  while `allUsers` is bound, Cloud Run does not check the token at all, so a wrong audience would stay hidden and
+  surface only once the kill switch removed `allUsers` and flushes started failing, during the incident.
 - **Kill switch.** The scheduler account keeps `roles/run.invoker` on the broker as its own additive member, so
   flushes work while the switch has removed `allUsers`: telemetry matters most during an incident, and the call is
   authenticated twice (Google IAM, then the broker). The switch removes only `allUsers`, and the stack has no
@@ -45,8 +49,8 @@ the SDK's background exporter between requests.
 - Cloud Scheduler is a new API and a new service account. A flush failing is silent except in the logs and in gaps
   on the dashboard; the existing alerts do not cover it.
 - Token expiry is a calendar chore: an expired token looks like "no data".
-- UNVERIFIED until the first apply: Scheduler's OIDC to Cloud Run with the dedicated account, the predicted broker
-  URL (a Terraform check warns), and Grafana's free-tier limits under this load.
+- UNVERIFIED until the first apply: Scheduler's OIDC to Cloud Run with the dedicated account, the custom audience
+  being accepted by the broker's own verification, and Grafana's free-tier limits under this load.
 
 ## Alternatives considered
 - **Keys with broad scopes:** one token for everything. Rejected: a leak from the PC would expose the cloud's too.

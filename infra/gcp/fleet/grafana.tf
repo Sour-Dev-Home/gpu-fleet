@@ -16,10 +16,11 @@
 # the other's member. The broker still checks the ID token itself (audience, email, email_verified).
 
 locals {
-  # Cloud Run's deterministic URL for the broker: https://<service>-<project number>.<region>.run.app. Built
-  # from names so the broker's env does not reference its own service (a cycle). The check below compares it
-  # with the real URL after the apply.
-  broker_url = "https://fleet-broker-${data.google_project.this.number}.${var.region}.run.app"
+  # The flush token's audience. A custom audience on the broker service (cloudrun.tf, custom_audiences) lets
+  # Cloud Run accept ID tokens minted for this string, so nothing depends on a predicted run.app URL. One value,
+  # used three times: the service's custom_audiences, the Scheduler's oidc_token audience and the broker's
+  # FLEET_FLUSH_OIDC_AUDIENCE (a test pins that they are the same). It is a name, not a secret.
+  flush_audience = "fleet-telemetry-flush"
 
   # The job needs a broker to call and the export switched on.
   flush_enabled = var.grafana_export && var.broker_image != null
@@ -36,7 +37,7 @@ locals {
   grafana_env = {
     OTEL_EXPORTER_OTLP_ENDPOINT = var.grafana_otlp_endpoint
     FLEET_GRAFANA_INSTANCE_ID   = var.grafana_instance_id
-    FLEET_FLUSH_OIDC_AUDIENCE   = local.broker_url
+    FLEET_FLUSH_OIDC_AUDIENCE   = local.flush_audience
     FLEET_FLUSH_OIDC_EMAIL      = google_service_account.scheduler.email
   }
 }
@@ -103,7 +104,7 @@ resource "google_cloud_scheduler_job" "telemetry_flush" {
     # No body and no Authorization header of our own: Scheduler adds the Google-signed ID token.
     oidc_token {
       service_account_email = google_service_account.scheduler.email
-      audience              = local.broker_url
+      audience              = local.flush_audience
     }
   }
 
@@ -111,13 +112,4 @@ resource "google_cloud_scheduler_job" "telemetry_flush" {
     google_project_service.api,
     google_cloud_run_v2_service_iam_member.scheduler_invokes,
   ]
-}
-
-# The token's audience is local.broker_url; the broker checks it against the same value. If Google ever changes
-# the URL scheme, every flush would be refused: this warns after an apply.
-check "broker_url_matches_the_service" {
-  assert {
-    condition     = var.broker_image == null || google_cloud_run_v2_service.broker[0].uri == local.broker_url
-    error_message = "The broker's run.app URL is not the predicted one: the flush token's audience will not match. Set local.broker_url from the real URL."
-  }
 }

@@ -2,7 +2,7 @@
 
 Cloud Scheduler calls the broker with an ID token minted for its own service account. The broker
 accepts it only if Google signed it (the certificate set is cached), it has not expired, its audience is
-this service's URL, its issuer is Google, and its email is the one configured AND verified. Anything
+the configured one (a Cloud Run custom audience, not a URL), its issuer is Google, and its email is the one configured AND verified. Anything
 else, including a failed certificate fetch, is "not authenticated": a bool, never a reason, so the
 caller can only answer 401 and nothing about the token reaches a log.
 """
