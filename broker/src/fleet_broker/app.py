@@ -303,8 +303,9 @@ def create_app(
 
 
 def _from_env() -> FastAPI | None:
-    worker_token = os.environ.get("FLEET_WORKER_TOKEN")
-    admin_token = os.environ.get("FLEET_ADMIN_TOKEN")
+    # Stripped: a secret store often returns "token\n", which no HTTP header can carry.
+    worker_token = os.environ.get("FLEET_WORKER_TOKEN", "").strip()
+    admin_token = os.environ.get("FLEET_ADMIN_TOKEN", "").strip()
     if not (worker_token and admin_token):
         return None  # imported by tests or tools: no app without both tokens
     # A real broker process: uvicorn has set up its loggers by now, so replace them with JSON.
@@ -326,8 +327,8 @@ def _from_env() -> FastAPI | None:
     pool = make_pool(database_url)
     flush_logs = telemetry.export_logs()  # a no-op without the [otel] extra and an endpoint
     # Set only while a rotation is under way (docs/secrets.md "Rotating broker tokens").
-    previous_worker = os.environ.get("FLEET_WORKER_TOKEN_PREVIOUS", "")
-    previous_admin = os.environ.get("FLEET_ADMIN_TOKEN_PREVIOUS", "")
+    previous_worker = os.environ.get("FLEET_WORKER_TOKEN_PREVIOUS", "").strip()
+    previous_admin = os.environ.get("FLEET_ADMIN_TOKEN_PREVIOUS", "").strip()
     worker_tokens = tuple(t for t in (worker_token, previous_worker) if t)
 
     def tracing(a: FastAPI) -> Callable[[], None]:

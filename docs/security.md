@@ -21,7 +21,7 @@ Out of scope everywhere: an attacker on the maintainer's own PC (they would alre
   declared bodies over 16 KiB get 413.
 - `/docs` and `/openapi.json` are off unless `FLEET_DOCS=1`.
 - The worker refuses to send its token over `http://` to anything but loopback.
-- `*.db`, `*.db-wal`, `*.db-shm` and `*.db-journal` are git-ignored, and the database defaults to `data/broker.db`.
+- `*.db`, `*.db-wal`, `*.db-shm` and `*.db-journal` are git-ignored, and the broker has no database default: `FLEET_DATABASE_URL` (PostgreSQL, ADR 0020) is required.
 - Baseline: no committed secrets or personal paths; pip-audit is clean on both lockfiles; SQL is
   parameterized; lease tokens come from `secrets`; tokens never appear in logs or exceptions.
 
@@ -40,13 +40,16 @@ Out of scope everywhere: an attacker on the maintainer's own PC (they would alre
       In the app rather than Cloud Armor, which needs a load balancer (about $18/month,
       docs/research/phase-4.md). Q46, 2026-11-25.
 - [ ] A Cloud Run max-instances cap (phase 4 step 4): the bucket is per instance, so the cap bounds the
-      fleet-wide rate and the bill.
+      fleet-wide rate and the compute. It does not bound the bill: unauthenticated requests are still
+      billed per request (see the open item below).
+- [ ] Unauthenticated request cost: Cloud Run bills every request that reaches the service, including
+      the ones the app answers 401 or 429. Max instances bounds throughput and compute only. Decide on a
+      budget alert with a kill switch, or a front layer that sheds junk before it is billed.
 - [x] Token rotation: each role accepts a `*_PREVIOUS` token during a rollover; steps in docs/secrets.md.
 - [ ] HTTPS only, through Cloud Run's managed TLS. No plain-HTTP listener is exposed.
-- [ ] Replace SQLite with a networked store (ADR 0005), then re-check its access control.
-      The store part is done (PostgreSQL, ADR 0020: local Compose and CI; the database has no published
-      port, and its URL and password are never logged). Stays open until step 4 puts Cloud SQL behind
-      Cloud Run and re-checks who can reach it (private IP or connector, IAM, backups).
+- [x] Networked store: PostgreSQL (ADR 0020: local Compose and CI; the database has no published port,
+      and its URL and password are never logged). Cloud SQL access control (private IP or connector,
+      IAM, backups) is checked in phase 4 step 4.
 - [x] Store `sha256(lease_token)` instead of the token, so a read of the store can't take over leases.
       Plain SHA-256: tokens are 128 random bits, so there's nothing to brute-force. (Rows from before the
       change were hashed in place on startup, until the PostgreSQL store, which has no old data.)
@@ -54,6 +57,8 @@ Out of scope everywhere: an attacker on the maintainer's own PC (they would alre
   maintainer's, or a leaked token) can use up the shared poll bucket and slow the others. Heartbeats have
   their own bucket, so a `/lease` hot loop can't cost running jobs their leases; results are
   content-addressed, so the worst case is churn, not loss. Per-worker tokens and buckets fix it (below).
+- Accepted until phase 10 (backlog): the broker trusts the `result_key` a worker reports on completion;
+  it does not check that the result exists or matches the job's inputs.
 - [ ] Run the security-reviewer again on the deployment (Terraform, IAM, Cloud Run settings).
 
 **Before phase 10 (volunteers):**

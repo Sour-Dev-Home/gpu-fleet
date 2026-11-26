@@ -258,3 +258,12 @@ out/
 models/
 *.mp4
 *.mkv
+
+# worker output, local credentials, agent worktrees
+results/
+**/results/
+.claude/worktrees/
+credentials.json
+*-key.json
+application_default_credentials.json
+*.json.key

@@ -36,7 +36,9 @@ def test_any_rejected_job_fails_the_command(monkeypatch):
 
 def posted_jobs(monkeypatch, argv):
     jobs = []
-    monkeypatch.setattr(enqueue, "post_job", lambda url, token, job: jobs.append(job) or 201)
+    monkeypatch.setattr(
+        enqueue, "post_job", lambda url, token, job, allow_http: jobs.append(job) or 201
+    )
     assert main(argv, env={"FLEET_ADMIN_TOKEN": ADMIN}) == 0
     return jobs
 
@@ -87,7 +89,7 @@ class Net:
         self.script = list(script)
         self.calls = 0
 
-    def __call__(self, url, token, job):
+    def __call__(self, url, token, job, allow_http):
         self.calls += 1
         step = self.script.pop(0)
         if isinstance(step, Exception):
@@ -147,8 +149,8 @@ def test_post_job_reads_retry_after_from_a_503(monkeypatch):
     def fake_urlopen(req, timeout):
         raise urllib.error.HTTPError(req.full_url, 503, "busy", headers, None)
 
-    monkeypatch.setattr(enqueue.urllib.request, "urlopen", fake_urlopen)
-    status = enqueue.post_job("http://x", "t", {"job_id": "j"})
+    monkeypatch.setattr(enqueue, "_open", fake_urlopen)
+    status = enqueue.post_job("http://127.0.0.1:1", "t", {"job_id": "j"})
     assert (int(status), status.retry_after) == (503, 7.0)
 
 

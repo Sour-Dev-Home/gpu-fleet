@@ -31,6 +31,35 @@ def test_broker_clearance_is_explicit_config():
     assert "FLEET_WORKER_CLEARANCE: footage,derived,open" in service("broker")
 
 
+def test_broker_and_worker_are_locked_down():
+    # Read-only root, no capabilities, no privilege gain: a compromised process can't write
+    # outside /tmp (tmpfs) and the worker's results volume, or escalate.
+    for name in ("broker", "worker"):
+        block = service(name)
+        assert "read_only: true" in block, name
+        assert "cap_drop: [ALL]" in block, name
+        assert 'security_opt: ["no-new-privileges:true"]' in block, name
+        assert 'tmpfs: ["/tmp:size=64m,mode=1777,noexec,nosuid,nodev"]' in block, name
+
+
+def test_postgres_cannot_gain_privileges():
+    # Only this: the image starts as root and drops itself, so cap_drop ALL would break its entrypoint.
+    block = service("postgres")
+    assert 'security_opt: ["no-new-privileges:true"]' in block
+    assert not any(line.startswith(("cap_drop", "read_only")) for line in block)
+
+
+def test_worker_results_volume_stays_writable():
+    block = service("worker")
+    assert "- results:/results" in block
+    assert not any("results:/results:ro" in line for line in block)
+
+
+def test_enqueue_has_its_plain_http_opt_in():
+    # fleet-enqueue refuses plain http to non-loopback hosts; Compose's http://broker:8000 needs this.
+    assert 'FLEET_ALLOW_HTTP: "1"' in service("broker")
+
+
 def test_broker_restarts():
     assert "restart: unless-stopped" in service("broker")
 
