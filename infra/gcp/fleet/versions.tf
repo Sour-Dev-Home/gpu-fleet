@@ -23,6 +23,12 @@ provider "google" {
   project = var.project_id
   region  = var.region
 
+  # The budget API is called with the maintainer's own credentials (no keys), which need a project to bill the
+  # call to: without these two, google_billing_budget fails with user credentials (provider docs). The user needs
+  # serviceusage.services.use on the project (an Owner has it).
+  user_project_override = true
+  billing_project       = var.project_id
+
   # Google label values allow only lowercase letters, digits, "_" and "-", so the AWS stack's
   # "aws/fleet" becomes "gcp-fleet" here.
   default_labels = {

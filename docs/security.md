@@ -46,7 +46,8 @@ Out of scope everywhere: an attacker on the maintainer's own PC (they would alre
 - [ ] Unauthenticated request cost: Cloud Run bills every request that reaches the service, including
       the ones the app answers 401 or 429. Max instances bounds throughput and compute only. Decide on a
       budget alert with a kill switch, or a front layer that sheds junk before it is billed.
-- [ ] Budget kill switch: on a budget breach, cut Cloud Run's public access (a separate PR after the first deploy).
+- [ ] Budget kill switch: built; deployed in phase 4 (ADR 0024). At 100% of $20 a private Cloud Run service drops
+      `allUsers` from the broker's invoker role; `terraform apply` restores it. Budget data lags by hours.
 - [x] Token rotation: each role accepts a `*_PREVIOUS` token during a rollover; steps in docs/secrets.md.
 - [ ] HTTPS only, through Cloud Run's managed TLS. No plain-HTTP listener is exposed.
 - [x] Networked store: PostgreSQL (ADR 0020: local Compose and CI; the database has no published port,

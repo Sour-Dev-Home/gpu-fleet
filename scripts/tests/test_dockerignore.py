@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-BUILD_CONTEXTS = ["worker", "broker"]  # each directory with a Dockerfile
+BUILD_CONTEXTS = ["worker", "broker", "killswitch"]  # each directory with a Dockerfile
 REQUIRED = [
     ".git",
     ".venv",

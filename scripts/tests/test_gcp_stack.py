@@ -228,6 +228,9 @@ def test_service_account_has_only_the_three_roles():
         "roles/cloudsql.instanceUser",
         "roles/secretmanager.secretAccessor",
         "roles/run.invoker",
+        # the kill switch (killswitch.tf; test_killswitch_stack.py checks their scope)
+        "roles/pubsub.publisher",  # Cloud Billing, on the budget topic
+        "roles/iam.serviceAccountTokenCreator",  # Pub/Sub's service agent, on the pusher account
     }
 
 

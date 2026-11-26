@@ -29,5 +29,6 @@ updated to point to it.
 | [0021](0021-cloud-run-and-cloud-sql-deployment.md) | Cloud Run and Cloud SQL deployment: sidecar proxy with IAM login, public IP with connectors required, no stored secrets | Accepted (phase 4, step 4) |
 | [0022](0022-container-hardening-and-pinned-ci-tools.md) | Read-only, capability-free Compose containers; SHA-pinned hooks; hash-pinned CI tools; enqueue transport guard | Accepted (maintainer, 2026-11-25, Q67) |
 | [0023](0023-broker-verifies-result-keys.md) | The broker recomputes the result key and answers 422 to a mismatch; worker maps it to ResultRejected | Accepted (maintainer, 2026-11-25, Q66) |
+| [0024](0024-budget-kill-switch.md) | Budget kill switch: at 100% of $20, a private Cloud Run service removes public access to the broker | Accepted (maintainer, 2026-11-25, Q70-Q73) |
 
 Template: Status, Date, Context, Decision, Consequences, Alternatives considered. Keep each one to a page.

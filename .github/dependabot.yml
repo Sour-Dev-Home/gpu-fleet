@@ -16,7 +16,7 @@ updates:
     groups:
       actions: { patterns: ["*"] }
   - package-ecosystem: uv
-    directories: [/worker, /broker]
+    directories: [/worker, /broker, /killswitch]
     schedule: { interval: weekly }
     cooldown: { default-days: 7 } # let a fresh release age before a bump is proposed
     groups:
@@ -48,7 +48,7 @@ updates:
     groups:
       compose: { patterns: ["*"] }
   - package-ecosystem: docker # base image digests in each Dockerfile (ADR 0014)
-    directories: [/worker, /broker]
+    directories: [/worker, /broker, /killswitch]
     schedule: { interval: weekly }
     cooldown: { default-days: 7 }
     groups:
