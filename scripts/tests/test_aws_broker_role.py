@@ -67,8 +67,24 @@ def test_trust_pins_the_audience_with_string_equals():
     assert aud, "no StringEquals condition on accounts.google.com:oaud"
 
 
-def test_trust_has_exactly_the_two_conditions():
-    assert len(re.findall(r"\bcondition\s*\{", trust())) == 2
+def test_trust_pins_azp_to_the_same_ids_as_defense_in_depth():
+    aud = re.search(
+        r'condition\s*\{[^}]*test\s*=\s*"StringEquals"[^}]*variable\s*=\s*"accounts\.google\.com:aud"'
+        r"[^}]*values\s*=\s*var\.broker_google_sa_unique_id",
+        trust(),
+        flags=re.DOTALL,
+    )
+    assert aud, "no StringEquals condition on accounts.google.com:aud (azp)"
+
+
+def test_trust_has_exactly_the_three_conditions():
+    assert len(re.findall(r"\bcondition\s*\{", trust())) == 3
+
+
+def test_the_unique_ids_are_not_marked_sensitive():
+    # an identifier, not a credential; sensitive would hide the whole trust policy in the plan
+    ids = block("variables.tf", 'variable "broker_google_sa_unique_id"')
+    assert "sensitive" not in ids
 
 
 def test_no_wildcard_or_stringlike_in_the_trust():
@@ -117,7 +133,7 @@ def test_the_unique_ids_are_a_numeric_list_with_no_default_and_the_audience_has_
     ids = block("variables.tf", 'variable "broker_google_sa_unique_id"')
     assert re.search(r"type\s*=\s*list\(string\)", ids)
     assert "default" not in ids  # from TF_VAR_broker_google_sa_unique_id, never from a file
-    assert "[0-9]+" in ids  # numeric only
+    assert "^[0-9]{21}$" in ids  # Google service account unique IDs are 21 digits
     assert re.search(r"length\(var\.broker_google_sa_unique_id\)\s*>\s*0", ids)
     aud = block("variables.tf", 'variable "federation_audience"')
     assert re.search(r'default\s*=\s*"fleet-aws-federation"', aud)

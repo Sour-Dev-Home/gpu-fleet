@@ -56,6 +56,15 @@ def test_get_url_is_for_the_exact_object_and_lasts_ten_minutes():
 # --- presigned PUT ---
 
 
+def test_both_url_lifetimes_stay_inside_the_credential_refresh_window():
+    # A URL dies with the credentials that signed it, and botocore renews them 10-15 minutes
+    # before expiry: a URL signed just before a renewal must not outlive that margin.
+    assert s3.GET_SECONDS <= 600 and s3.PUT_SECONDS <= 600
+    b = bucket()
+    assert query(b.get_url("inputs/x"))["X-Amz-Expires"] == str(s3.GET_SECONDS)
+    assert query(b.put_target("results/x", "b" * 64, 1).url)["X-Amz-Expires"] == str(s3.PUT_SECONDS)
+
+
 def test_put_target_signs_length_checksum_and_no_overwrite():
     sha = hashlib.sha256(b"hello").hexdigest()
     target = bucket().put_target(f"results/{A}", sha, 5)

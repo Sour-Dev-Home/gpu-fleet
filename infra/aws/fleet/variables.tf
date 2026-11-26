@@ -29,11 +29,10 @@ variable "region" {
 variable "broker_google_sa_unique_id" {
   description = "Unique IDs (numeric, not emails) of the Google service accounts that may assume the broker role: the broker's, later phase 6's jobs account. From TF_VAR_broker_google_sa_unique_id (a JSON list, from the vault), never a file: see README."
   type        = list(string)
-  sensitive   = true
 
   validation {
-    condition     = length(var.broker_google_sa_unique_id) > 0 && alltrue([for id in var.broker_google_sa_unique_id : can(regex("^[0-9]+$", id))])
-    error_message = "broker_google_sa_unique_id must be a non-empty list of numeric service account unique IDs (gcloud iam service-accounts describe <email> --format=\"value(uniqueId)\")."
+    condition     = length(var.broker_google_sa_unique_id) > 0 && alltrue([for id in var.broker_google_sa_unique_id : can(regex("^[0-9]{21}$", id))])
+    error_message = "broker_google_sa_unique_id must be a non-empty list of 21-digit service account unique IDs (gcloud iam service-accounts describe <email> --format=\"value(uniqueId)\")."
   }
 }
 

@@ -39,10 +39,12 @@ on Google Cloud (ADR 0019/0021) and S3 is on AWS, so it needs AWS credentials wi
   botocore `RefreshableCredentials`, which renews before expiry. A small provider, not boto3's token-file mode
   (whether that re-reads a changed file is unverified). Presigning is local: no AWS call per lease.
   Terraform (`infra/aws/fleet/broker_role.tf`): role `fleet-broker`, trust principal `Federated:
-  accounts.google.com` (built in to AWS: no OIDC provider resource) with two `StringEquals` conditions:
+  accounts.google.com` (built in to AWS: no OIDC provider resource) with three `StringEquals` conditions:
   `accounts.google.com:sub` is one of `var.broker_google_sa_unique_id` (a list, for phase 6's jobs account too;
-  numeric, no default, read from `TF_VAR_` so the IDs never reach git) AND `accounts.google.com:oaud` equals
-  `var.federation_audience` (default `fleet-aws-federation`). Permissions: `s3:GetObject` on `inputs/*` and
+  21 digits each, no default) AND `accounts.google.com:aud` (the token's `azp`, the same ID) is one of them,
+  as defense in depth, AND `accounts.google.com:oaud` equals `var.federation_audience` (default
+  `fleet-aws-federation`). The IDs are identifiers, not credentials, so the variable is not `sensitive` (that
+  would hide the whole trust policy in every plan); they come from `TF_VAR_` only to stay out of git. Permissions: `s3:GetObject` on `inputs/*` and
   `results/*`, `s3:PutObject` on `results/*`, nothing else. **No `s3:ListBucket`**, so S3 answers 403 for a key that
   does not exist; the broker reads 403 and 404 on HEAD as "missing" (any other error is a 503, retried).
 - **Local mode is unchanged (Q79).** Without `FLEET_RESULTS_BUCKET`, leases have exactly the old fields and
@@ -70,6 +72,10 @@ on Google Cloud (ADR 0019/0021) and S3 is on AWS, so it needs AWS credentials wi
   `If-None-Match`.
 - Cloud Run needs `FLEET_RESULTS_BUCKET`, `FLEET_AWS_ROLE_ARN` (from `terraform output`), `FLEET_AWS_AUDIENCE` and
   `AWS_REGION`; that wiring is a follow-up PR (`infra/gcp` is not touched here).
+- **Accepted logging gap:** CloudTrail event history keeps `AssumeRoleWithWebIdentity` for 90 days at no cost.
+  There are no S3 data events and no alert on assume-role. A management trail to S3 is a later option.
+- URL lifetimes (10 and 5 minutes) stay within botocore's 10-15 minute credential refresh margin, so a URL
+  never outlives the credentials that signed it (tested).
 - Cost: S3 requests at this scale are cents (a few thousand a month); STS is free.
 
 ## Alternatives considered

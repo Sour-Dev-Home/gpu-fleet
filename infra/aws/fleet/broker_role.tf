@@ -21,6 +21,14 @@ data "aws_iam_policy_document" "broker_trust" {
       values   = var.broker_google_sa_unique_id
     }
 
+    # :aud is the token's authorized party (azp), the same service account ID: defense in depth, so a
+    # token must name the right account in both claims.
+    condition {
+      test     = "StringEquals"
+      variable = "accounts.google.com:aud"
+      values   = var.broker_google_sa_unique_id
+    }
+
     # :oaud is the audience the token was requested for. A token minted for another service, even
     # by the same service account, is refused.
     condition {

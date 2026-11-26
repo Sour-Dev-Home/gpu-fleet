@@ -26,6 +26,7 @@ METADATA_IDENTITY_URL = (
 )
 METADATA_TIMEOUT = 5.0  # seconds: the metadata server is on the same host
 SESSION_NAME = "fleet-broker"  # shows in CloudTrail as the assumed-role session
+# Presigned URL lifetimes (s3.py GET_SECONDS, PUT_SECONDS) must stay <= botocore's 10-15 minute refresh margin.
 SESSION_SECONDS = 3600  # the role's max_session_duration (Terraform) is the same
 
 

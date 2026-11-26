@@ -21,6 +21,9 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from . import federation
 
+# A presigned URL dies with the credentials that signed it. Those last SESSION_SECONDS (federation.py,
+# 3600) and botocore renews them 10-15 minutes before expiry, so a URL signed at the last moment still
+# fits in its own lifetime only if it lasts no longer than that margin: keep both <= 600 (tested).
 GET_SECONDS = 600  # a 10 minute window to start downloading an input
 PUT_SECONDS = 300  # and 5 to start the upload; a transfer already begun is not cut off
 DEFAULT_MAX_RESULT_BYTES = 10_000_000  # a description is kilobytes; 10 MB is a bug or an attack
