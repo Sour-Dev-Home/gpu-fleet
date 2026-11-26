@@ -30,6 +30,9 @@ Syncthing-backed folder plus a USB copy (you own the backups).
 - Terraform: name the secret `TF_VAR_<variable>` and run `with-secrets.ps1 -Names TF_VAR_x -- terraform plan`;
   mark the variable `sensitive = true`. State can still hold secret values: keep state in the private, encrypted
   remote backend (phase 3), never in git.
+- Grafana Cloud (ADR 0027): `FLEET_GRAFANA_OTLP_URL`, `FLEET_GRAFANA_INSTANCE_ID` and one write-only token per source
+  (`FLEET_GRAFANA_TOKEN_BROKER`, `_PC_ALLOY`, `_PC_WORKER`, 90-day expiry), plus `TF_VAR_grafana_otlp_endpoint` and
+  `TF_VAR_grafana_instance_id`. Use and rotation: `infra/gcp/fleet/README.md` and `observability/alloy/README.md`.
 - The vault locks after 15 minutes; `Unlock-SecretStore` to unlock early. Exam tie-in: same idea as Secrets Manager /
   Parameter Store, but local and free.
 - Broker tokens (ADR 0011): two random, different tokens, generated straight into the vault so you never see them:

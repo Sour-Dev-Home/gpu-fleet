@@ -1,0 +1,58 @@
+// The PC's host metrics to Grafana Cloud (ADR 0027, Q91). Run by Grafana Alloy as a Windows service;
+// scripts/setup-alloy.ps1 copies this file to %ProgramData%\fleet\alloy\ (a protected directory, because the
+// service runs as SYSTEM), points the service at the COPY and sets the environment variables below.
+//
+//   prometheus.exporter.windows -> prometheus.scrape -> otelcol.receiver.prometheus
+//     -> otelcol.processor.transform (service.instance.id) -> otelcol.exporter.otlphttp (basic auth)
+//
+// Nothing secret or account-specific is written here:
+//   FLEET_GRAFANA_OTLP_URL      the OTLP gateway base URL (vault: FLEET_GRAFANA_OTLP_URL)
+//   FLEET_GRAFANA_INSTANCE_ID   basic-auth user name (vault: FLEET_GRAFANA_INSTANCE_ID)
+//   FLEET_GRAFANA_TOKEN_FILE    path of the file holding the write-only token (ACL: SYSTEM + Administrators)
+//   FLEET_INSTALL_ID            the worker's install ID, so PC metrics and worker metrics share service.instance.id
+
+prometheus.exporter.windows "pc" {
+  enabled_collectors = ["cpu", "memory", "logical_disk", "net", "gpu"]
+}
+
+prometheus.scrape "pc" {
+  targets         = prometheus.exporter.windows.pc.targets
+  forward_to      = [otelcol.receiver.prometheus.pc.receiver]
+  scrape_interval = "60s"
+}
+
+otelcol.receiver.prometheus "pc" {
+  output {
+    metrics = [otelcol.processor.transform.pc.input]
+  }
+}
+
+otelcol.processor.transform "pc" {
+  // Alloy strings concatenate with +. setup-alloy.ps1 accepts only install IDs of [A-Za-z0-9._-], so the value
+  // cannot break out of the OTTL string.
+  metric_statements {
+    context    = "resource"
+    statements = [
+      `set(attributes["service.instance.id"], "` + sys.env("FLEET_INSTALL_ID") + `")`,
+      `set(attributes["service.name"], "fleet-pc")`,
+    ]
+  }
+
+  output {
+    metrics = [otelcol.exporter.otlphttp.grafana.input]
+  }
+}
+
+otelcol.auth.basic "grafana" {
+  client_auth {
+    username      = sys.env("FLEET_GRAFANA_INSTANCE_ID")
+    password_file = sys.env("FLEET_GRAFANA_TOKEN_FILE")
+  }
+}
+
+otelcol.exporter.otlphttp "grafana" {
+  client {
+    endpoint = sys.env("FLEET_GRAFANA_OTLP_URL")
+    auth     = otelcol.auth.basic.grafana.handler
+  }
+}

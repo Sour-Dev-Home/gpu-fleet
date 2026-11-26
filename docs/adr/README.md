@@ -32,5 +32,6 @@ updated to point to it.
 | [0024](0024-budget-kill-switch.md) | Budget kill switch: at 100% of $20, a private Cloud Run service removes public access to the broker | Accepted (maintainer, 2026-11-25, Q70-Q73) |
 | [0025](0025-presigned-urls-and-aws-federation.md) | Presigned S3 URLs for inputs and results; the broker reaches AWS by web identity federation; /complete HEADs the stored result | Accepted (maintainer, 2026-11-25, Q74-Q80) |
 | [0026](0026-telemetry-signals.md) | Telemetry signals: `fleet.jobs.unclaimable` and its alert, `POST /jobs/{id}/cancel`, the worker's start line, install ID and metrics | Accepted (maintainer, 2026-11-26, Q84-Q87) |
+| [0027](0027-telemetry-destination.md) | Telemetry destination: Grafana Cloud Free over OTLP, one write-only token per source, a Scheduler-driven flush under request-based billing | Accepted (maintainer, 2026-11-26, Q88-Q92) |
 
 Template: Status, Date, Context, Decision, Consequences, Alternatives considered. Keep each one to a page.

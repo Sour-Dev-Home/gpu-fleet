@@ -194,4 +194,5 @@ def test_project_number_is_known_at_plan_time():
 def test_readme_shorthand_lists_billing_account_everywhere_it_lists_the_alert_email():
     text = (STACK / "README.md").read_text(encoding="utf-8")
     lists = re.findall(r"-Names (TF_VAR_project_id,TF_VAR_alert_email\S*)", text)
-    assert lists and all(x.endswith(",TF_VAR_billing_account") for x in lists)
+    # may be followed by more names (the Grafana export's two variables, ADR 0027)
+    assert lists and all(",TF_VAR_billing_account" in x for x in lists)

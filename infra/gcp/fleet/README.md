@@ -279,6 +279,75 @@ $bucket = terraform -chdir=infra/aws/fleet output -raw results_bucket
 $env:FLEET_RESULTS_HOST = "$bucket.s3.amazonaws.com"
 ```
 
+## Grafana Cloud export (ADR 0027)
+
+The broker's metrics, logs and traces go to Grafana Cloud Free over OTLP/HTTP; the local LGTM stack stays for
+development. **Platform metrics** (Cloud Run request counts and latency, Cloud SQL CPU and disk) stay in the
+Google Cloud console under Monitoring and are not exported.
+
+**Why a scheduler.** Cloud Run bills request-based: CPU only while a request runs, so the SDK's background exporter
+starves between requests. Cloud Scheduler calls `POST /telemetry/flush` once a minute with an OIDC ID token of the
+service account `fleet-scheduler` (audience = the fixed custom audience `fleet-telemetry-flush`); the broker verifies the signature, audience, email
+and `email_verified`, collects the gauges once and force-flushes metrics, traces and logs (10 s cap). No admin token
+is stored in Scheduler. **Cost:** 43,200 requests a month (one a minute) against Cloud Run's 2M free requests, and
+Scheduler's 3 free jobs (this is one). The broker is not kept warm; the flush wakes it, which is the point.
+
+**One write-only token per source** (Grafana console, Administration, Cloud access policies: scopes
+`metrics:write`, `logs:write`, `traces:write`, expiry 90 days): `fleet-broker`, `pc-alloy`, `pc-worker`. Basic auth:
+user = the stack's OTLP instance ID, password = the token. Vault entries (prompted, never in chat):
+
+```powershell
+Set-Secret -Vault fleet -Name FLEET_GRAFANA_OTLP_URL           # the OTLP gateway base URL ending in /otlp
+Set-Secret -Vault fleet -Name FLEET_GRAFANA_INSTANCE_ID        # the numeric OTLP instance ID
+Set-Secret -Vault fleet -Name FLEET_GRAFANA_TOKEN_BROKER
+Set-Secret -Vault fleet -Name FLEET_GRAFANA_TOKEN_PC_ALLOY     # see scripts/setup-alloy.ps1
+Set-Secret -Vault fleet -Name FLEET_GRAFANA_TOKEN_PC_WORKER    # see scripts/grafana-env.ps1
+Set-Secret -Vault fleet -Name TF_VAR_grafana_otlp_endpoint     # the same URL as FLEET_GRAFANA_OTLP_URL
+Set-Secret -Vault fleet -Name TF_VAR_grafana_instance_id       # the same ID as FLEET_GRAFANA_INSTANCE_ID
+```
+
+**Turn it on** (the secret container always exists; the broker reads `latest` at start, so add the version FIRST):
+
+```powershell
+$add = "import os,shutil,subprocess,sys; subprocess.run([shutil.which('gcloud'),'secrets','versions','add',sys.argv[2],'--data-file=-'],input=os.environ[sys.argv[1]].encode(),check=True)"
+../../../scripts/with-secrets.ps1 -Names FLEET_GRAFANA_TOKEN_BROKER -- python -c $add FLEET_GRAFANA_TOKEN_BROKER fleet-grafana-token-broker
+# check the stored bytes as in step 4 (no trailing newline), then:
+../../../scripts/with-secrets.ps1 -Names TF_VAR_project_id,TF_VAR_alert_email,TF_VAR_billing_account,TF_VAR_grafana_otlp_endpoint,TF_VAR_grafana_instance_id -- terraform apply -var grafana_export=true
+```
+
+(Python hands the exact bytes to gcloud, as in step 4: no `\r\n`.) With `grafana_export = false` (the default) the broker's
+environment has none of the Grafana settings, the job does not exist, and the two `TF_VAR_grafana_*` names are not
+needed. With it true and either value missing, the plan fails with a clear message.
+
+**Verify:** `gcloud scheduler jobs run fleet-telemetry-flush --location us-central1`, then
+`gcloud run services logs read fleet-broker --region us-central1` (a flush is a `POST /telemetry/flush` with 204) and
+Grafana Explore for `service_name="fleet-broker"`. The deployer needs Cloud Scheduler Admin and Service Account
+User on `fleet-scheduler`. The Scheduler service agent needs no `tokenCreator` grant: it gets
+`roles/cloudscheduler.serviceAgent` automatically when the API is enabled, and that role can mint tokens for
+same-project service accounts. **UNVERIFIED until the first apply:** that Grafana's gateway accepts the exporter's
+gzip/protobuf bodies on the free tier, and that Cloud Run accepts the `fleet-telemetry-flush` custom audience as
+written (the provider validates the field; the token path itself has not run).
+
+**IAM and the kill switch.** `fleet-scheduler` holds `roles/run.invoker` on the broker service as its own additive
+member (`scheduler_invokes`), so flushes still work while the kill switch has removed `allUsers`: the telemetry that
+explains an incident keeps flowing, at 43,200 calls a month. The switch rewrites the policy read-modify-write and drops
+only `allUsers` (a test in `killswitch/tests` pins that other members stay), and this stack has no authoritative IAM
+binding or policy on the service, so an apply neither removes the scheduler's member nor fights the switch. Note that a
+switch that has fired still shows only `public` "to add" in a plan.
+
+### Rotating the Grafana tokens (90-day expiry, one per source)
+
+Put the expiry date in the vault entry's metadata or your calendar; a token that expires silently looks like "no data".
+In every case: create the NEW token first, switch the consumer, then delete the old token in the console.
+- **Broker** (`FLEET_GRAFANA_TOKEN_BROKER`): Grafana console, add a token to the `fleet-broker` policy; `Set-Secret -Vault
+  fleet -Name FLEET_GRAFANA_TOKEN_BROKER` (prompts); add the Secret Manager version with the command above; start a
+  new revision (`gcloud run services update fleet-broker --region us-central1`); then delete the old token in the
+  console and disable and destroy the old secret version.
+- **Alloy on the PC** (`FLEET_GRAFANA_TOKEN_PC_ALLOY`): new token on the `pc-alloy` policy; `Set-Secret`; run
+  `scripts/setup-alloy.ps1` again (it rewrites the ACL-protected token file and restarts the service); delete the old token.
+- **Worker** (`FLEET_GRAFANA_TOKEN_PC_WORKER`): new token on the `pc-worker` policy; `Set-Secret`; the next process
+  started through `scripts/grafana-env.ps1` uses it; delete the old token.
+
 ## 10. Teardown
 
 Deletion protection is on at three levels. Set `deletion_protection = false` on the instance AND

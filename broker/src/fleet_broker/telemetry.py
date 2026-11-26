@@ -12,12 +12,13 @@ Labels are low-cardinality (model, prompt version, data class, state); job IDs n
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import threading
 import time
 import uuid
-from collections.abc import Callable, Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping, MutableMapping
 
 from . import jsonlog
 from .claimability import Claimability
@@ -56,6 +57,10 @@ class Metrics:
 
     def limited(self) -> None:
         pass
+
+    def flush(self, timeout_millis: int) -> bool:
+        """Export now (POST /telemetry/flush). True when there was nothing to do or it all went out."""
+        return True
 
     def shutdown(self) -> None:
         pass
@@ -176,6 +181,12 @@ class OtelMetrics(Metrics):
 
     def limited(self) -> None:
         self._limited.add(1)
+
+    def flush(self, timeout_millis: int) -> bool:
+        # The periodic reader's force_flush collects first (the gauge callbacks read the database once)
+        # and then exports, in the caller's thread: Cloud Run gives CPU to this request, not to the
+        # background export thread between requests.
+        return bool(self.provider.force_flush(timeout_millis))
 
     def shutdown(self) -> None:
         # Export what's left: Cloud Run stops instances often, and the last window would be lost.
@@ -350,13 +361,16 @@ def trace_app(
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
         base = check_endpoint(env)
-        otlp = _scrubbing(OTLPSpanExporter(endpoint=base + "/v1/traces"))
+        otlp = _scrubbing(
+            OTLPSpanExporter(endpoint=base + "/v1/traces", timeout=jsonlog.EXPORT_TIMEOUT_SECONDS)
+        )
         provider.add_span_processor(BatchSpanProcessor(otlp))
     else:  # tests: the same scrubbing, so they check what really leaves
         provider.add_span_processor(SimpleSpanProcessor(_scrubbing(exporter)))
     FastAPIInstrumentor.instrument_app(
         app, tracer_provider=provider, exclude_spans=["receive", "send"]
     )
+    app.state.tracer_provider = provider  # POST /telemetry/flush force-flushes it (ADR 0027)
     return provider.shutdown
 
 
@@ -413,7 +427,9 @@ def setup(
     )
     # The endpoint comes from `env` (the HTTP exporter adds the signal path), not from the
     # exporter's own os.environ lookup, so what setup checked is what gets used.
-    exporter = OTLPMetricExporter(endpoint=metrics_endpoint(env))
+    exporter = OTLPMetricExporter(
+        endpoint=metrics_endpoint(env), timeout=jsonlog.EXPORT_TIMEOUT_SECONDS
+    )
     provider = MeterProvider(
         metric_readers=[PeriodicExportingMetricReader(exporter)], resource=resource
     )
@@ -423,3 +439,28 @@ def setup(
         return now, reader_store.stats(now)
 
     return OtelMetrics(provider, stats, claimability)
+
+
+def grafana_headers(instance_id: str, token: str) -> str:
+    """The OTEL_EXPORTER_OTLP_HEADERS value for Grafana Cloud's OTLP gateway: HTTP basic auth, user =
+    the stack's instance ID, password = a write-only token (ADR 0027). The SDK splits this variable on
+    spaces and commas and URL-decodes the value, so the space after "Basic" must be written as %20."""
+    pair = base64.b64encode(f"{instance_id}:{token}".encode()).decode()
+    return f"Authorization=Basic%20{pair}"
+
+
+def apply_grafana_auth(env: MutableMapping[str, str]) -> bool:
+    """Build the exporters' Authorization header from FLEET_GRAFANA_INSTANCE_ID and FLEET_GRAFANA_TOKEN
+    and put it in env as OTEL_EXPORTER_OTLP_HEADERS, which the three OTLP exporters read. False when no
+    token is set (the local collector needs none). Half a setup is an error; messages never carry the
+    values, and nothing here logs: the header is a credential."""
+    token = env.get("FLEET_GRAFANA_TOKEN", "").strip()
+    instance_id = env.get("FLEET_GRAFANA_INSTANCE_ID", "").strip()
+    if not token and not instance_id:
+        return False
+    if not (token and instance_id):
+        raise ValueError(
+            "FLEET_GRAFANA_INSTANCE_ID and FLEET_GRAFANA_TOKEN must be set together (values not shown)"
+        )
+    env["OTEL_EXPORTER_OTLP_HEADERS"] = grafana_headers(instance_id, token)
+    return True

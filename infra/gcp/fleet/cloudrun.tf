@@ -33,6 +33,9 @@ resource "google_cloud_run_v2_service" "broker" {
   ingress             = "INGRESS_TRAFFIC_ALL"
   deletion_protection = true
 
+  # Audience of the Scheduler's flush token (grafana.tf, local.flush_audience): a fixed name instead of the URL.
+  custom_audiences = [local.flush_audience]
+
   template {
     service_account = google_service_account.broker.email
 
@@ -106,6 +109,29 @@ resource "google_cloud_run_v2_service" "broker" {
         }
       }
 
+      # Grafana Cloud export (ADR 0027, grafana.tf): none of these exist unless var.grafana_export is true.
+      # The endpoint, the instance ID and the flush identity are plain values (sensitive variables), the
+      # token is a secret reference. The broker builds the Authorization header at startup.
+      dynamic "env" {
+        for_each = local.grafana_env_names
+        content {
+          name  = env.key
+          value = local.grafana_env[env.key]
+        }
+      }
+      dynamic "env" {
+        for_each = var.grafana_export ? [1] : []
+        content {
+          name = "FLEET_GRAFANA_TOKEN"
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.grafana_token_broker.secret_id
+              version = "latest"
+            }
+          }
+        }
+      }
+
       # Only during a token rotation (README): the broker also accepts the previous tokens.
       dynamic "env" {
         for_each = var.rotation_in_progress ? {
@@ -175,11 +201,19 @@ resource "google_cloud_run_v2_service" "broker" {
     }
   }
 
+  lifecycle {
+    precondition {
+      condition     = !var.grafana_export || (var.grafana_otlp_endpoint != null && var.grafana_instance_id != null)
+      error_message = "grafana_export needs TF_VAR_grafana_otlp_endpoint and TF_VAR_grafana_instance_id (README, Grafana Cloud export)."
+    }
+  }
+
   depends_on = [
     google_project_service.api,
     google_project_iam_member.sql_client,
     google_project_iam_member.sql_instance_user,
     google_secret_manager_secret_iam_member.broker_reads,
+    google_secret_manager_secret_iam_member.broker_reads_grafana,
     google_sql_user.broker,
   ]
 }

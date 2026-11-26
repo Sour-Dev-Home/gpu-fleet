@@ -8,6 +8,7 @@ requires-python = ">=3.11"
 dependencies = [
     "boto3>=1.40",
     "fastapi>=0.165.0",
+    "google-auth>=2.40",
     "psycopg-pool>=3.3.3",
     "psycopg[binary]>=3.2",
     "uvicorn>=0.54.0",
