@@ -20,9 +20,13 @@ def test_the_pubsub_channel_publishes_to_the_flood_topic_and_the_4xx_alert_uses_
     ch = res("monitoring.tf", "google_monitoring_notification_channel", "flood")
     assert 'type         = "pubsub"' in ch
     assert re.search(r"topic\s*=\s*google_pubsub_topic\.flood\.id", ch)
-    assert (
-        "google_pubsub_topic_iam_member.monitoring_publishes_flood" in ch
-    )  # the grant comes first
+    # The CHANNEL comes first: it is what creates Monitoring's notification service agent, so the grant waits for
+    # it (a grant to a not-yet-existing agent fails).
+    assert "google_pubsub_topic_iam_member.monitoring_publishes_flood" not in ch
+    grant = res("killswitch.tf", "google_pubsub_topic_iam_member", "monitoring_publishes_flood")
+    assert re.search(
+        r"depends_on\s*=\s*\[[^\]]*google_monitoring_notification_channel\.flood", grant
+    )
     pol = res("monitoring.tf", "google_monitoring_alert_policy", "broker_4xx")
     chans = re.search(r"notification_channels\s*=\s*\[(.*?)\]", pol, re.DOTALL).group(1)
     assert "google_monitoring_notification_channel.email.id" in chans

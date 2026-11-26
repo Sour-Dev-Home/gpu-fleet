@@ -25,8 +25,10 @@ resource "google_monitoring_notification_channel" "flood" {
     topic = google_pubsub_topic.flood.id # projects/<project>/topics/fleet-flood
   }
 
-  # Creating the channel checks that Monitoring may publish: the grant must exist first.
-  depends_on = [google_project_service.api, google_pubsub_topic_iam_member.monitoring_publishes_flood]
+  # Created BEFORE the topic grant: Monitoring creates its notification service agent when a project's first
+  # Pub/Sub channel is added, so granting first fails with "service account does not exist" (Google's
+  # notification-options docs, checked 2026-11-26). The grant in killswitch.tf depends on this channel.
+  depends_on = [google_project_service.api]
 }
 
 # Threshold: more than 5 client errors per second, summed over every instance, for 5 straight minutes (1500+

@@ -209,14 +209,16 @@ resource "google_pubsub_topic" "flood" {
   depends_on = [google_project_service.api]
 }
 
-# Cloud Monitoring's notification service agent may publish to THIS topic only. The email format is from Google's
-# "Create and manage notification channels" docs (Pub/Sub channels): service-PROJECT_NUMBER@gcp-sa-monitoring-
-# notification.iam.gserviceaccount.com. UNVERIFIED until the first apply: if the channel refuses to create, check
-# that page for the current agent name.
+# Cloud Monitoring's notification service agent may publish to THIS topic only, with roles/pubsub.publisher
+# (Google's notification-options docs, checked 2026-11-26: service-PROJECT_NUMBER@gcp-sa-monitoring-notification
+# .iam.gserviceaccount.com). That agent only exists once the project's first Pub/Sub channel is created, so this
+# grant waits for the channel (monitoring.tf).
 resource "google_pubsub_topic_iam_member" "monitoring_publishes_flood" {
   topic  = google_pubsub_topic.flood.name
   role   = "roles/pubsub.publisher"
   member = "serviceAccount:service-${data.google_project.this.number}@gcp-sa-monitoring-notification.iam.gserviceaccount.com"
+
+  depends_on = [google_monitoring_notification_channel.flood]
 }
 
 # Same pusher account and OIDC audience (the service URL) as the budget subscription; only the path differs.
