@@ -40,6 +40,20 @@ unauthenticated requests costs money until someone notices. A budget alert only 
   showing that binding "to add" means the switch fired. Fix the cause, raise `budget_usd` if the spend was legitimate,
   apply. If spend is still at the budget the next notification trips it again.
 
+- **Gross spend (Q81, maintainer, 2026-11-25).** `EXCLUDE_ALL_CREDITS`: net of the ~$296 credits the figure stays
+  about $0 and would never fire, and the credits are what pay for phases 6-7. It also counts free-tier usage as
+  spend. Runbook: confirm in the billing report, with credits excluded, that normal running is about $10-11 gross
+  before trusting $20. `currency_code = "USD"` must match the billing account's currency. Design limit: the switch
+  does not stop Cloud SQL's always-on cost.
+- **Accidental reset.** Any `terraform apply` re-adds the broker's `allUsers` binding. A plan showing
+  `google_cloud_run_v2_service_iam_member.public` "to add", when you did not intend a reset, means the switch fired:
+  stop and investigate first. A Terraform `check "broker_is_public"` reads the broker's real IAM policy and warns
+  at plan time when `allUsers` is absent (a warning, never an error; quiet before the broker exists).
+- **Accepted residual risk, with detection.** A per-service `setIamPolicy` can grant any role on the broker, so a
+  compromised switch could grant itself or others access. A log-match alert emails on every Admin Activity
+  `SetIamPolicy` on the broker by the switch's account. A filter cannot tell an add from a remove, and each one
+  should be rare and expected, so all are reported (filter syntax UNVERIFIED until the drill).
+
 ## Consequences
 - **Delay.** Budget data lags by hours, and the first notification can take several. The switch caps damage; it
   does not stop the first dollar. The instance cap and rate limit still bound the burn rate meanwhile.

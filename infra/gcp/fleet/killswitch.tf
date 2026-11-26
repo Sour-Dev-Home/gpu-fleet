@@ -10,8 +10,8 @@
 
 data "google_project" "this" {
   project_id = var.project_id
-
-  depends_on = [google_project_service.api]
+  # No depends_on on the API set: cloudresourcemanager is already enabled, and a dependency would defer the
+  # read, leaving the project number unknown at plan time.
 }
 
 locals {
@@ -140,13 +140,14 @@ resource "google_pubsub_topic_iam_member" "billing_publishes" {
 }
 
 # Needed in some setups (UNVERIFIED): the Pub/Sub service agent mints the OIDC token as the pusher account.
-# Granted on that one account, not the project.
+# Projects created after April 2021 don't need the grant, but it is harmless. Granted on that one account, not
+# the project. It waits for the topic, so the Pub/Sub API is on and the service agent exists.
 resource "google_service_account_iam_member" "pubsub_mints_pusher_token" {
   service_account_id = google_service_account.budget_pusher.name
   role               = "roles/iam.serviceAccountTokenCreator"
   member             = "serviceAccount:service-${data.google_project.this.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
 
-  depends_on = [google_project_service.api]
+  depends_on = [google_project_service.api, google_pubsub_topic.budget]
 }
 
 # No dead-letter topic: a message the switch cannot handle is acknowledged (malformed) or retried with backoff

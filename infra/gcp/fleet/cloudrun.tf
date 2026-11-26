@@ -154,6 +154,10 @@ resource "google_cloud_run_v2_service" "broker" {
 
 # allUsers may call the URL; the application checks the bearer token (Q39). An organization policy that
 # forbids allUsers would fail this apply: say so rather than weaken it.
+#
+# WARNING (kill switch, killswitch.tf, ADR 0024): ANY apply re-adds this binding, so it also undoes a fired
+# switch. A plan showing this binding "to add" when you did not intend a reset means the switch fired: stop and
+# investigate first (the check "broker_is_public" below also warns).
 resource "google_cloud_run_v2_service_iam_member" "public" {
   count = var.broker_image == null ? 0 : 1
 
@@ -161,4 +165,19 @@ resource "google_cloud_run_v2_service_iam_member" "public" {
   location = google_cloud_run_v2_service.broker[0].location
   role     = "roles/run.invoker"
   member   = "allUsers"
+}
+
+# Plan-time warning (not an error) when the deployed broker is NOT public: the kill switch has fired, or someone
+# removed the binding. Check-scoped data sources report read failures as warnings too, so this is quiet before
+# the broker exists. It reads the real policy each plan, which is what a plan diff can't show before refresh.
+check "broker_is_public" {
+  data "google_cloud_run_v2_service_iam_policy" "broker" {
+    name     = "fleet-broker"
+    location = var.region
+  }
+
+  assert {
+    condition     = strcontains(data.google_cloud_run_v2_service_iam_policy.broker.policy_data, "allUsers")
+    error_message = "The broker is not public: the budget kill switch has probably fired (ADR 0024). Investigate before applying: apply restores public access."
+  }
 }

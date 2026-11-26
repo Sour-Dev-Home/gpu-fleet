@@ -26,13 +26,14 @@ $env:AWS_PROFILE = "fleet"
 ```powershell
 Set-Secret -Vault fleet -Name TF_VAR_project_id     # prompts; paste the project ID
 Set-Secret -Vault fleet -Name TF_VAR_alert_email    # prompts
+Set-Secret -Vault fleet -Name TF_VAR_billing_account   # prompts; the billing account ID (kill switch)
 cd infra/gcp/fleet
 ../../../scripts/with-secrets.ps1 -Names TF_VAR_project_id -- pwsh -NoProfile -Command 'gcloud auth application-default set-quota-project $env:TF_VAR_project_id'
-../../../scripts/with-secrets.ps1 -Names TF_VAR_project_id,TF_VAR_alert_email -- terraform init
+../../../scripts/with-secrets.ps1 -Names TF_VAR_project_id,TF_VAR_alert_email,TF_VAR_billing_account -- terraform init
 ```
 
 (The quota project makes Application Default Credentials bill API calls to this project, not a Google default.)
-Every Terraform command below runs as `../../../scripts/with-secrets.ps1 -Names TF_VAR_project_id,TF_VAR_alert_email -- terraform ...`,
+Every Terraform command below runs as `../../../scripts/with-secrets.ps1 -Names TF_VAR_project_id,TF_VAR_alert_email,TF_VAR_billing_account -- terraform ...`,
 shortened to `tf`. `gcloud` commands that need the ID run under `with-secrets` too, or use `gcloud config set project` once.
 
 ## 3. First apply (no image)
@@ -194,6 +195,10 @@ the first dollar. It needs `TF_VAR_billing_account` (the billing account ID, in 
 Administrator (or Costs Manager) on the billing account, plus Pub/Sub Admin. The google provider here sets
 `user_project_override` and `billing_project` so the budget API call is billed to the project.
 
+**Before trusting $20**: open the billing report for this project with credits excluded and confirm normal running
+is about $10-11 gross (the budget counts gross spend, free-tier usage included). `currency_code = "USD"` must
+match the billing account's currency.
+
 **Build, push, apply** (the same as steps 7 and 8, image name `killswitch`, tag = short SHA). The first apply with
 `killswitch_image` null already creates the budget, topic and accounts; the service and subscription come with the image:
 
@@ -215,7 +220,10 @@ take hours: after the drill, check the killswitch logs again once the budget has
 - `curl.exe -i "$url/lease"` answers `403` with Google's HTML page (not the broker's JSON 401).
 - The killswitch logs (`gcloud run services logs read fleet-killswitch --region us-central1`) show
   `budget reached: public access removed` with the cost and budget.
-- `tf plan` shows `google_cloud_run_v2_service_iam_member.public` "to add". That is the switch having fired.
+- `tf plan` shows `google_cloud_run_v2_service_iam_member.public` "to add". That is the switch having fired, and
+  the `broker_is_public` check warns too. If you did not intend a reset: stop and investigate first, because any
+  apply (even an unrelated one) restores public access.
+- An email "fleet kill switch changed the broker's IAM policy" arrives for every SetIamPolicy by the switch.
 
 **Reset**: fix the cause (a flood? check the broker's logs and the bill), raise `budget_usd` if the spend was
 legitimate, then `tf apply`: the plan re-adds the `allUsers` binding. If spend is still at the budget, the next

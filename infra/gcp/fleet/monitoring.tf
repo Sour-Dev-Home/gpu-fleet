@@ -46,3 +46,35 @@ resource "google_monitoring_alert_policy" "broker_4xx" {
 
   depends_on = [google_project_service.api]
 }
+
+# Residual risk of the kill switch (ADR 0024): its custom role can set the broker's IAM policy, so a compromised
+# switch could grant any role on the broker. Each SetIamPolicy by its account should be rare and expected (only
+# when the budget trips), so any one is emailed. A log filter cannot tell an add from a remove, so it alerts on
+# every one. Admin Activity audit logs are always on. Filter syntax UNVERIFIED until the drill fires it.
+resource "google_monitoring_alert_policy" "killswitch_iam_change" {
+  display_name = "fleet kill switch changed the broker's IAM policy"
+  combiner     = "OR"
+
+  conditions {
+    display_name = "SetIamPolicy on the broker by the kill switch account"
+
+    condition_matched_log {
+      filter = <<-EOT
+        logName:"cloudaudit.googleapis.com%2Factivity"
+        protoPayload.methodName:"SetIamPolicy"
+        protoPayload.resourceName:"services/fleet-broker"
+        protoPayload.authenticationInfo.principalEmail="${google_service_account.killswitch.email}"
+      EOT
+    }
+  }
+
+  alert_strategy {
+    notification_rate_limit {
+      period = "300s" # required for log-match alerts
+    }
+  }
+
+  notification_channels = [google_monitoring_notification_channel.email.id]
+
+  depends_on = [google_project_service.api]
+}

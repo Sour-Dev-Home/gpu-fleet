@@ -3,7 +3,7 @@ digest-pinned image, a budget scoped to this project. No cloud call. Comments ar
 
 import re
 
-from test_gcp_stack import all_code, block, code
+from test_gcp_stack import ROOT, STACK, all_code, block, code
 
 
 def res(kind: str, name: str) -> str:
@@ -49,8 +49,9 @@ def test_the_runtime_account_holds_no_other_role():
 
 def test_the_killswitch_service_is_private():
     text = all_code()
-    assert text.count("allUsers") == 1  # only the broker's public binding in cloudrun.tf
-    assert "allUsers" in code("cloudrun.tf")
+    # the only allUsers MEMBER is the broker's public binding in cloudrun.tf (the check block only reads)
+    assert re.findall(r'member\s*=\s*"allUsers"', text) == ['member   = "allUsers"']
+    assert re.search(r'member\s*=\s*"allUsers"', code("cloudrun.tf"))
     assert "allAuthenticatedUsers" not in text
     b = res("google_cloud_run_v2_service_iam_member", "pusher_invokes")
     assert 'role     = "roles/run.invoker"' in b
@@ -126,3 +127,54 @@ def test_provider_bills_budget_calls_to_the_project():
 def test_the_two_apis_are_enabled():
     m = code("main.tf")
     assert '"billingbudgets.googleapis.com"' in m and '"pubsub.googleapis.com"' in m
+
+
+def test_a_check_block_warns_when_the_broker_is_not_public():
+    b = code("cloudrun.tf")
+    c = b[b.index('check "broker_is_public"') :]
+    assert 'data "google_cloud_run_v2_service_iam_policy" "broker"' in c
+    assert re.search(
+        r'strcontains\(data\.google_cloud_run_v2_service_iam_policy\.broker\.policy_data, "allUsers"\)',
+        c,
+    )
+
+
+def test_public_binding_carries_a_warning_comment_and_docs_say_stop_and_investigate():
+    raw = (STACK / "cloudrun.tf").read_text(encoding="utf-8")
+    head = raw[: raw.index('resource "google_cloud_run_v2_service_iam_member" "public"')]
+    assert "stop and" in head[-900:] and "investigate" in head[-900:]
+    for doc in ("infra/gcp/fleet/README.md", "docs/adr/0024-budget-kill-switch.md"):
+        text = (ROOT / doc).read_text(encoding="utf-8")
+        assert "to add" in text and "stop and investigate first" in text, doc
+
+
+def test_alert_on_every_killswitch_iam_change_to_the_broker():
+    b = block("monitoring.tf", 'resource "google_monitoring_alert_policy" "killswitch_iam_change"')
+    assert "condition_matched_log" in b
+    assert 'protoPayload.methodName:"SetIamPolicy"' in b
+    assert 'protoPayload.resourceName:"services/fleet-broker"' in b
+    assert (
+        'protoPayload.authenticationInfo.principalEmail="${google_service_account.killswitch.email}"'
+        in b
+    )
+    assert "cloudaudit.googleapis.com%2Factivity" in b
+    assert re.search(r"notification_rate_limit\s*\{\s*period\s*=\s*\"\d+s\"", b)
+    assert "google_monitoring_notification_channel.email.id" in b
+
+
+def test_token_creator_grant_waits_for_the_topic():
+    b = res("google_service_account_iam_member", "pubsub_mints_pusher_token")
+    assert "google_pubsub_topic.budget" in re.search(
+        r"depends_on\s*=\s*\[(.*?)\]", b, re.DOTALL
+    ).group(1)
+
+
+def test_project_number_is_known_at_plan_time():
+    b = block("killswitch.tf", 'data "google_project" "this"')
+    assert "depends_on" not in b
+
+
+def test_readme_shorthand_lists_billing_account_everywhere_it_lists_the_alert_email():
+    text = (STACK / "README.md").read_text(encoding="utf-8")
+    lists = re.findall(r"-Names (TF_VAR_project_id,TF_VAR_alert_email\S*)", text)
+    assert lists and all(x.endswith(",TF_VAR_billing_account") for x in lists)
