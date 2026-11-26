@@ -9,6 +9,12 @@ variable "versioning" {
   default     = false
 }
 
+variable "data_allowed_principal_arns" {
+  description = "Role ARNs (wildcards allowed) that alone may Get/Put/Delete objects under inputs/ and results/; everyone else is denied. Empty (the default) adds no such lock. Role ARNs, not assumed-role session ARNs."
+  type        = list(string)
+  default     = []
+}
+
 variable "noncurrent_days" {
   description = "Days to keep an old version (only with versioning)."
   type        = number

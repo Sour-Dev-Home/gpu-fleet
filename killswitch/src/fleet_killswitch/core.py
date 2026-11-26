@@ -65,6 +65,63 @@ def parse_push(body: bytes) -> tuple[float, float] | None:
     return cost, budget
 
 
+def parse_alert(body: bytes) -> tuple[str, str] | None:
+    """(state, policy_name) from a Cloud Monitoring Pub/Sub notification, or None if it is not one.
+
+    STRICT: both must be strings in `incident`. Nothing else is read, and a budget notification (no
+    `incident`) is not an alert.
+    """
+    try:
+        envelope = json.loads(body)
+        data = base64.b64decode(envelope["message"]["data"], validate=True)
+        note = json.loads(data)
+    except (ValueError, KeyError, TypeError, binascii.Error):
+        return None
+    if not isinstance(note, dict):
+        return None
+    incident = note.get("incident")
+    if not isinstance(incident, dict):
+        return None
+    state, policy = incident.get("state"), incident.get("policy_name")
+    if not isinstance(state, str) or not isinstance(policy, str):
+        return None
+    return state, policy
+
+
+def handle_alert(body: bytes, iam: Iam, service: str, policy: str) -> int:
+    """The flood alert (Q93). Acts only on an OPEN incident of the one expected policy (`policy`, from the
+    environment, compared by exact equality); everything else is logged and acknowledged, never raised."""
+    parsed = parse_alert(body)
+    if parsed is None:
+        log("ERROR", "not a Cloud Monitoring alert, acknowledged and ignored")
+        return 200
+    state, name = parsed
+    if not policy or name != policy:
+        log("WARNING", "alert for another policy, ignored", policy=name)
+        return 200
+    if state != "open":
+        log("INFO", "incident not open, nothing to do", policy=name, state=state)
+        return 200
+    try:
+        outcome = trip(iam, service)
+    except Exception as exc:  # noqa: BLE001 - not fired yet: ask Pub/Sub to redeliver
+        log(
+            "ERROR",
+            "could not remove public access, will be redelivered",
+            policy=name,
+            error=type(exc).__name__,
+        )
+        return 500
+    log(
+        "WARNING",
+        f"flood alert: public access {outcome.replace('_', ' ')}",
+        policy=name,
+        outcome=outcome,
+        service=service,
+    )
+    return 200
+
+
 def remove_public(policy: Any) -> bool:
     """Drop allUsers from the invoker role, in place. True if anything changed."""
     changed = False

@@ -1,6 +1,6 @@
 # Q65: a flood of unauthenticated requests costs per request even though the instance cap bounds compute. A
-# burst of 4xx (wrong or missing tokens, scans, rate-limit 429s) is the sign, so it sends an email. The budget
-# kill switch that would act on it is a separate PR after the first deploy.
+# burst of 4xx (wrong or missing tokens, scans, rate-limit 429s) is the sign, so it sends an email, and (Q93)
+# trips the kill switch, which does not wait for the hours-late budget data.
 # Cost UNVERIFIED: alerting policies are reportedly no longer free (about $1.50/month per condition). Check the
 # first bill; one condition here.
 resource "google_monitoring_notification_channel" "email" {
@@ -14,6 +14,25 @@ resource "google_monitoring_notification_channel" "email" {
   depends_on = [google_project_service.api]
 }
 
+# Q93: an OPEN incident of the 4xx policy below also cuts public access, in minutes. Cloud Monitoring publishes
+# the incident to the NEW topic fleet-flood (killswitch.tf), whose own push subscription calls the kill switch's
+# /alert path. Separate topic, subscription and path from the budget's, so the two payload shapes never mix.
+resource "google_monitoring_notification_channel" "flood" {
+  display_name = "fleet flood (kill switch)"
+  type         = "pubsub"
+
+  labels = {
+    topic = google_pubsub_topic.flood.id # projects/<project>/topics/fleet-flood
+  }
+
+  # Creating the channel checks that Monitoring may publish: the grant must exist first.
+  depends_on = [google_project_service.api, google_pubsub_topic_iam_member.monitoring_publishes_flood]
+}
+
+# Threshold: more than 5 client errors per second, summed over every instance, for 5 straight minutes (1500+
+# requests). That is a flood, not a twitch: a misconfigured worker with a wrong token polls about once a second
+# (1/s, well under 5/s) and would be one noisy email at most, not a kill. A scan or a token-guessing burst is
+# well above it. The condition is rate-based over a 60 s alignment, so one spike does not open an incident.
 resource "google_monitoring_alert_policy" "broker_4xx" {
   display_name = "fleet-broker: 4xx request rate"
   combiner     = "OR"
@@ -37,10 +56,13 @@ resource "google_monitoring_alert_policy" "broker_4xx" {
     }
   }
 
-  notification_channels = [google_monitoring_notification_channel.email.id]
+  notification_channels = [
+    google_monitoring_notification_channel.email.id,
+    google_monitoring_notification_channel.flood.id, # opening the incident trips the kill switch (/alert)
+  ]
 
   documentation {
-    content   = "More than 5 client-error responses per second for 5 minutes on fleet-broker: token guessing, a scan, or a broken worker. See docs/security.md."
+    content   = "More than 5 client-error responses per second for 5 minutes on fleet-broker: token guessing or a scan. The kill switch has removed public access (see the kill switch README: reset with terraform apply once the cause is gone). See docs/security.md."
     mime_type = "text/markdown"
   }
 

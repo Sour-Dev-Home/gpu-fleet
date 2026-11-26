@@ -278,7 +278,7 @@ def test_setup_locks_the_parent_folder_and_recreates_the_token_file():
     # a reused token file keeps any handle a user opened on it before the ACL change.
     code = strip_ps(SETUP.read_text(encoding="utf-8"))
     assert re.search(r"\$parent\s*=\s*Join-Path\s+\$env:ProgramData\s+'fleet'", code)
-    assert re.search(r"foreach \(\$path in @\(\$parent, \$dir, \$tokenFile\)\)", code)
+    assert re.search(r"foreach \(\$path in @\(\$parent, \$dir, \$dataDir, \$tokenFile\)\)", code)
     assert re.search(r"Assert-NotReparsePoint \$parent", code)
     assert re.search(r"Remove-Item -LiteralPath \$tokenFile", code)
     assert code.index("Remove-Item -LiteralPath $tokenFile") < code.index("Set-Acl")
@@ -287,6 +287,29 @@ def test_setup_locks_the_parent_folder_and_recreates_the_token_file():
     # the reparse check comes before any ACL is changed or the token written
     assert code.index("ReparsePoint") < code.index("SetOwner")
     assert code.index("ReparsePoint") < code.index("WriteAllText")
+
+
+def test_setup_pins_and_locks_the_services_storage_directory():
+    # Alloy's data dir (WAL of unsent metrics, component state) is SYSTEM's: under the default
+    # %ProgramData%\GrafanaLabs\Alloy\data a user could read or replace it. Pin --storage.path under our
+    # protected folder and give it the same owner and ACL routine as the rest.
+    code = strip_ps(SETUP.read_text(encoding="utf-8"))
+    assert re.search(r"\$dataDir\s*=\s*Join-Path\s+\$dir\s+'data'", code)
+    assert re.search(r"New-Item -ItemType Directory -Force \$dataDir", code)
+    assert re.search(r"Assert-NotReparsePoint \$dataDir", code)
+    assert re.search(r"--storage\.path=\$dataDir", code)
+    # an existing --storage.path flag is replaced, not kept next to ours
+    assert re.search(r"-notlike\s+'--storage\.path\*'", code)
+    # created and checked before the ACL loop, which now covers it
+    assert code.index("New-Item -ItemType Directory -Force $dataDir") < code.index("SetOwner")
+    assert code.index("Assert-NotReparsePoint $dataDir") < code.index("SetOwner")
+    # the data directory is never deleted and recreated (that would drop the unsent-metrics buffer)
+    assert "Remove-Item -LiteralPath $dataDir" not in code
+
+
+def test_readme_says_where_the_storage_directory_lives():
+    readme = (ROOT / "observability/alloy/README.md").read_text(encoding="utf-8")
+    assert "--storage.path" in readme and r"fleet\alloy\data" in readme
 
 
 def test_readme_validates_the_copied_config_before_restart():

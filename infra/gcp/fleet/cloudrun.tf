@@ -36,6 +36,13 @@ resource "google_cloud_run_v2_service" "broker" {
   # Audience of the Scheduler's flush token (grafana.tf, local.flush_audience): a fixed name instead of the URL.
   custom_audiences = [local.flush_audience]
 
+  # Service-level cap (the run.googleapis.com/maxScale annotation): the revision's scaling below does not set it,
+  # so without this a console or gcloud edit could raise the service cap away from the revision cap. Stated here
+  # so the two always agree (both var.max_instances) and a plan shows any drift.
+  scaling {
+    max_instance_count = var.max_instances
+  }
+
   template {
     service_account = google_service_account.broker.email
 

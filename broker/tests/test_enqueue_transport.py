@@ -54,7 +54,7 @@ def test_main_strips_the_admin_token(monkeypatch):
     sent = []
     monkeypatch.setattr(enqueue, "_open", lambda req, timeout: sent.append(req) or _Resp())
     env = {"FLEET_ADMIN_TOKEN": ADMIN + "\n", "FLEET_BROKER_URL": "https://example.com"}
-    assert main(["--demo", "1"], env=env) == 0
+    assert main(["--demo", "1", "--data-class", "open"], env=env) == 0
     assert sent[0].get_header("Authorization") == f"Bearer {ADMIN}"
 
 
@@ -63,7 +63,7 @@ def test_a_malformed_token_never_reaches_the_output(monkeypatch, capsys):
     # http.client would raise "Invalid header value b'Bearer <token>'": the secret in a traceback.
     bad = ADMIN[:10] + "\n" + ADMIN[10:]
     env = {"FLEET_ADMIN_TOKEN": bad, "FLEET_BROKER_URL": "http://127.0.0.1:1"}
-    assert main(["--demo", "1"], env=env) == 2
+    assert main(["--demo", "1", "--data-class", "open"], env=env) == 2
     out = capsys.readouterr()
     for text in (out.out, out.err):
         assert ADMIN[:10] not in text and ADMIN[10:] not in text
@@ -82,7 +82,7 @@ def test_a_header_error_from_the_transport_names_no_token(monkeypatch):
 def test_main_exits_2_for_a_refused_url(monkeypatch, capsys):
     monkeypatch.delenv("FLEET_ALLOW_HTTP", raising=False)
     env = {"FLEET_ADMIN_TOKEN": ADMIN, "FLEET_BROKER_URL": "http://example.com"}
-    assert main(["--demo", "1"], env=env) == 2
+    assert main(["--demo", "1", "--data-class", "open"], env=env) == 2
     assert "refusing" in capsys.readouterr().err
 
 
@@ -120,10 +120,10 @@ def test_post_job_ignores_the_process_environment(monkeypatch):
 def test_main_honours_the_opt_in_from_its_env(monkeypatch):
     monkeypatch.setattr(enqueue, "_open", lambda req, timeout: _Resp())
     env = {"FLEET_ADMIN_TOKEN": ADMIN, "FLEET_BROKER_URL": "http://broker:8000"}
-    assert main(["--demo", "1"], env=env) == 2
-    assert main(["--demo", "1"], env=env | {"FLEET_ALLOW_HTTP": "1"}) == 0
+    assert main(["--demo", "1", "--data-class", "open"], env=env) == 2
+    assert main(["--demo", "1", "--data-class", "open"], env=env | {"FLEET_ALLOW_HTTP": "1"}) == 0
     evil = env | {"FLEET_ALLOW_HTTP": "1", "FLEET_BROKER_URL": "http://evil.com"}
-    assert main(["--demo", "1"], env=evil) == 2
+    assert main(["--demo", "1", "--data-class", "open"], env=evil) == 2
 
 
 def test_a_redirect_is_reported_not_followed(monkeypatch):

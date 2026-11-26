@@ -36,6 +36,17 @@ variable "broker_google_sa_unique_id" {
   }
 }
 
+variable "admin_role_arn" {
+  description = "The maintainer's admin role: with the broker's role, the only principals that may read, write or delete objects in the results bucket (Q94). The ROLE's ARN (an SSO role's includes its path), not an assumed-role session ARN: aws:PrincipalArn of a session is the role's ARN. From TF_VAR_admin_role_arn (vault), never committed; contains the account ID."
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = can(regex("^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/*-]+$", var.admin_role_arn))
+    error_message = "admin_role_arn must be a role ARN: arn:aws:iam::<12 digits>:role/<path and name> (not an assumed-role session ARN)."
+  }
+}
+
 variable "federation_audience" {
   description = "The audience the broker requests in its Google ID token; the role's trust policy requires it (accounts.google.com:oaud). Not a secret: a label both sides agree on."
   type        = string

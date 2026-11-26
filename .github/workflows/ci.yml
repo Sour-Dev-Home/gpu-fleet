@@ -76,6 +76,15 @@ jobs:
           pip install --require-hashes -r .github/ci/requirements.txt
           export UV_PYTHON_DOWNLOADS=never # use setup-python's 3.11; fail loudly if missing
           bash scripts/check.sh tests
+      - name: pip-audit (the uv lockfiles of broker, worker and killswitch)
+        # pip-audit and uv come from the hash-pinned .github/ci/requirements.txt. The lockfiles pin every package
+        # (--no-deps: nothing is resolved here), so what is audited is what the images install.
+        run: |
+          pip install --require-hashes -r .github/ci/requirements.txt
+          for pkg in broker killswitch worker; do
+            uv export --frozen --no-hashes --no-emit-project --directory "$pkg" -o "$RUNNER_TEMP/req-$pkg.txt"
+            pip-audit -r "$RUNNER_TEMP/req-$pkg.txt" --no-deps --disable-pip
+          done
       - name: Build images (no push; a registry comes in phase 4, ADR 0014)
         run: |
           docker build -t fleet-worker:ci worker

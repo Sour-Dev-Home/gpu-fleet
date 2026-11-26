@@ -4,7 +4,7 @@ import base64
 import json
 
 import pytest
-from fleet_killswitch.core import INVOKER, PUBLIC, handle_push
+from fleet_killswitch.core import INVOKER, PUBLIC, handle_alert, handle_push
 from google.api_core import exceptions as gexc
 from google.iam.v1 import policy_pb2
 
@@ -208,3 +208,84 @@ def test_logs_are_json_lines_with_the_spend_and_no_payload_dump(capsys):
     lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert lines and all({"severity", "message"} <= set(entry) for entry in lines)
     assert any(entry.get("cost") == 21.0 and entry.get("budget") == 20.0 for entry in lines)
+
+
+# --- the Cloud Monitoring flood alert (Q93): a second, strict shape on its own path --------------------------
+
+POLICY = "fleet-broker: 4xx request rate"
+
+
+def alert(state: object = "open", policy: object = POLICY) -> bytes:
+    return push({"version": "1.2", "incident": {"state": state, "policy_name": policy}})
+
+
+def test_an_open_incident_for_the_expected_policy_removes_public_access():
+    iam = public_broker()
+    assert handle_alert(alert(), iam, SERVICE, POLICY) == 200
+    assert iam.members(INVOKER) == ["serviceAccount:ci@example.iam.gserviceaccount.com"]
+
+
+def test_a_closed_incident_does_not_fire():
+    iam = public_broker()
+    assert handle_alert(alert("closed"), iam, SERVICE, POLICY) == 200
+    assert iam.gets == 0 and iam.sets == []
+
+
+def test_another_policy_does_not_fire():
+    iam = public_broker()
+    assert handle_alert(alert(policy="some other policy"), iam, SERVICE, POLICY) == 200
+    assert iam.gets == 0 and iam.sets == []
+
+
+def test_no_expected_policy_configured_never_fires():
+    iam = public_broker()
+    assert handle_alert(alert(policy=""), iam, SERVICE, "") == 200
+    assert iam.gets == 0
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"",
+        b"not json",
+        json.dumps({"message": {"data": "!!!"}}).encode(),
+        push(b"not json", raw=True),
+        push([1]),
+        push({"incident": "open"}),
+        push({"version": "1.2"}),
+        push({"incident": {"state": "open"}}),  # no policy
+        push({"incident": {"policy_name": POLICY}}),  # no state
+        push({"incident": {"state": ["open"], "policy_name": POLICY}}),
+        push({"incident": {"state": "OPEN", "policy_name": POLICY}}),  # exact match only
+        push({"incident": {"state": "open", "policy_name": [POLICY]}}),
+        push({"costAmount": 99, "budgetAmount": 20}),  # a budget notification
+    ],
+)
+def test_malformed_alerts_are_ignored_not_raised(body):
+    iam = public_broker()
+    assert handle_alert(body, iam, SERVICE, POLICY) == 200
+    assert iam.gets == 0 and iam.sets == []
+
+
+def test_the_budget_path_rejects_the_alert_shape():
+    iam = public_broker()
+    assert handle_push(alert(), iam, SERVICE) == 200
+    assert iam.gets == 0 and iam.sets == []
+
+
+def test_the_alert_path_rejects_the_budget_shape():
+    iam = public_broker()
+    assert handle_alert(push({"costAmount": 21, "budgetAmount": 20}), iam, SERVICE, POLICY) == 200
+    assert iam.gets == 0 and iam.sets == []
+
+
+def test_an_iam_failure_on_an_open_alert_is_a_5xx_so_pubsub_redelivers():
+    iam = public_broker()
+    iam.transient = gexc.ServiceUnavailable("try later")
+    assert handle_alert(alert(), iam, SERVICE, POLICY) == 500
+
+
+def test_the_alert_log_names_the_policy_and_the_outcome(capsys):
+    handle_alert(alert(), public_broker(), SERVICE, POLICY)
+    lines = [json.loads(x) for x in capsys.readouterr().out.splitlines()]
+    assert any(e.get("outcome") == "removed" and e.get("policy") == POLICY for e in lines)

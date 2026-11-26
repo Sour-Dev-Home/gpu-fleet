@@ -77,6 +77,13 @@ resource "google_cloud_run_v2_service" "killswitch" {
   ingress             = "INGRESS_TRAFFIC_INTERNAL_ONLY"
   deletion_protection = true
 
+  # Service-level cap (the run.googleapis.com/maxScale annotation): the revision's scaling below does not set it,
+  # so without this a console or gcloud edit could raise the service cap away from the revision cap of 1. Stated
+  # here so the two always agree and a plan shows any drift.
+  scaling {
+    max_instance_count = 1
+  }
+
   template {
     service_account       = google_service_account.killswitch.email
     execution_environment = "EXECUTION_ENVIRONMENT_GEN1"
@@ -106,6 +113,13 @@ resource "google_cloud_run_v2_service" "killswitch" {
       env {
         name  = "FLEET_BROKER_SERVICE"
         value = local.broker_resource
+      }
+
+      # The only policy whose OPEN incident the /alert path acts on (exact display-name match). Taken from the
+      # policy, not a literal, so a rename cannot leave the switch deaf.
+      env {
+        name  = "FLEET_FLOOD_POLICY"
+        value = google_monitoring_alert_policy.broker_4xx.display_name
       }
     }
   }
@@ -172,6 +186,60 @@ resource "google_pubsub_subscription" "killswitch" {
 
   push_config {
     push_endpoint = google_cloud_run_v2_service.killswitch[0].uri
+
+    oidc_token {
+      service_account_email = google_service_account.budget_pusher.email
+      audience              = google_cloud_run_v2_service.killswitch[0].uri
+    }
+  }
+
+  depends_on = [
+    google_cloud_run_v2_service_iam_member.pusher_invokes,
+    google_service_account_iam_member.pubsub_mints_pusher_token,
+  ]
+}
+
+# --- the flood alert (Q93) ------------------------------------------------------------------------------------
+
+# A second topic, so the Cloud Monitoring payload never reaches the budget parser and the budget payload never
+# reaches the alert parser.
+resource "google_pubsub_topic" "flood" {
+  name = "fleet-flood"
+
+  depends_on = [google_project_service.api]
+}
+
+# Cloud Monitoring's notification service agent may publish to THIS topic only. The email format is from Google's
+# "Create and manage notification channels" docs (Pub/Sub channels): service-PROJECT_NUMBER@gcp-sa-monitoring-
+# notification.iam.gserviceaccount.com. UNVERIFIED until the first apply: if the channel refuses to create, check
+# that page for the current agent name.
+resource "google_pubsub_topic_iam_member" "monitoring_publishes_flood" {
+  topic  = google_pubsub_topic.flood.name
+  role   = "roles/pubsub.publisher"
+  member = "serviceAccount:service-${data.google_project.this.number}@gcp-sa-monitoring-notification.iam.gserviceaccount.com"
+}
+
+# Same pusher account and OIDC audience (the service URL) as the budget subscription; only the path differs.
+# Unhandled messages are acknowledged by the switch (200); an IAM failure is a 500 and Pub/Sub retries.
+resource "google_pubsub_subscription" "flood" {
+  count = var.killswitch_image == null ? 0 : 1
+
+  name  = "fleet-flood-killswitch"
+  topic = google_pubsub_topic.flood.id
+
+  ack_deadline_seconds       = 60
+  message_retention_duration = "86400s" # 1 day: an old "open" is stale once a human has looked
+  expiration_policy {
+    ttl = "" # never expire
+  }
+
+  retry_policy {
+    minimum_backoff = "10s"
+    maximum_backoff = "600s"
+  }
+
+  push_config {
+    push_endpoint = "${google_cloud_run_v2_service.killswitch[0].uri}/alert"
 
     oidc_token {
       service_account_email = google_service_account.budget_pusher.email

@@ -118,6 +118,38 @@ data "aws_iam_policy_document" "tls_only" {
       values   = ["1.2"]
     }
   }
+
+  # Q94: a data-plane lock. Nobody but the listed roles may read, write or delete objects under inputs/ and
+  # results/, whatever their IAM policies say (an explicit Deny beats any Allow, so a leaked or over-broad
+  # identity in this account still cannot reach the data).
+  # - aws:PrincipalArn of an assumed-role session (SSO, `aws login`, the broker's web-identity session) is the
+  #   ROLE's ARN, not the session ARN (arn:aws:sts::...:assumed-role/<role>/<session>), so list role ARNs. An
+  #   SSO role's ARN includes its path (role/aws-reserved/sso.amazonaws.com/<region>/AWSReservedSSO_...);
+  #   ArnNotLike accepts * wildcards for the part that varies.
+  # - A presigned URL is evaluated as its SIGNER (the broker role), so workers' uploads are unaffected.
+  # - Object actions only: bucket-level calls (policy, versioning, ListBucket, the Terraform plan/apply) are not
+  #   denied, so Terraform cannot lock itself out and an admin can always fix a wrong list by editing the policy.
+  dynamic "statement" {
+    for_each = length(var.data_allowed_principal_arns) > 0 ? [1] : []
+    content {
+      sid     = "DenyDataAccessExceptAllowedRoles"
+      effect  = "Deny"
+      actions = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+      resources = [
+        "${aws_s3_bucket.this.arn}/inputs/*",
+        "${aws_s3_bucket.this.arn}/results/*",
+      ]
+      principals {
+        type        = "*"
+        identifiers = ["*"]
+      }
+      condition {
+        test     = "ArnNotLike"
+        variable = "aws:PrincipalArn"
+        values   = var.data_allowed_principal_arns
+      }
+    }
+  }
 }
 
 resource "aws_s3_bucket_policy" "this" {

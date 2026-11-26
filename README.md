@@ -22,7 +22,7 @@ uv lock --check --directory broker
 # broker on 127.0.0.1:8000 and one echo worker (Ctrl+C stops them)
 ./scripts/with-secrets.ps1 -Names FLEET_WORKER_TOKEN,FLEET_ADMIN_TOKEN,FLEET_DB_PASSWORD -- docker compose up --build
 # in a second terminal: add 20 demo jobs for the echo runner, then stop the stack (volumes are kept)
-./scripts/with-secrets.ps1 -Names FLEET_WORKER_TOKEN,FLEET_ADMIN_TOKEN,FLEET_DB_PASSWORD -- docker compose run --rm broker fleet-enqueue --demo 20
+./scripts/with-secrets.ps1 -Names FLEET_WORKER_TOKEN,FLEET_ADMIN_TOKEN,FLEET_DB_PASSWORD -- docker compose run --rm broker fleet-enqueue --demo 20 --data-class open
 ./scripts/with-secrets.ps1 -Names FLEET_WORKER_TOKEN,FLEET_ADMIN_TOKEN,FLEET_DB_PASSWORD -- docker compose down
 ```
 
