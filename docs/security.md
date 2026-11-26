@@ -65,8 +65,8 @@ Out of scope everywhere: an attacker on the maintainer's own PC (they would alre
       B's result (ADR 0023, Q66). Still open: it does not check that the result is valid (quarantine, below).
 - [x] Workers hold no cloud keys and the broker stores none: presigned URLs per object (5 and 10 minutes, only
       for the lease holder's own keys), AWS credentials by web identity federation with a role that trusts
-      only the broker's service account and audience, and may only read `inputs/*`/`results/*` and write
-      `results/*` (ADR 0025, Q74-Q78). `/complete` HEADs the stored object and refuses one that is missing,
+      only the broker's service account and audience, and may only read `inputs/open/*`/`results/open/*` and write
+      `results/open/*`, the data class being in the key (ADR 0025, Q74-Q78, Q82). `/complete` HEADs the stored object and refuses one that is missing,
       over the size cap, or whose SHA-256 differs from what `/upload-url` signed, so a result is recorded
       only if it exists in storage. Not yet applied; S3 enforcement of the signed length, checksum and
       no-overwrite is measured by `scripts/probe-presign.py`.
@@ -78,3 +78,6 @@ Out of scope everywhere: an attacker on the maintainer's own PC (they would alre
       lease everything and push every job to `dead` in about `max_attempts × TTL`.
 - [ ] Result integrity (the key itself is done, ADR 0023): volunteer results
       go to a quarantine prefix and are promoted only after a check or after a second worker agrees.
+- [ ] First-stored-wins makes a poisoned result permanent (ADR 0025): the first object stored under a result key
+      is adopted by every later attempt. Needs an admin path to quarantine or delete a result object and reset
+      its job, and a record of which worker token or lease wrote each result.

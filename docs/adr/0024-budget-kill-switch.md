@@ -28,6 +28,11 @@ unauthenticated requests costs money until someone notices. A budget alert only 
   `run.services.getIamPolicy` and `run.services.setIamPolicy`, bound on the broker service only. The only predefined
   role with `setIamPolicy` is `roles/run.admin`, which can also deploy and delete. A custom role in a per-service
   binding is UNVERIFIED until the first apply.
+- **Authentication is Cloud Run IAM, not the app (accepted; security review Low 5).** The service does no JWT check
+  of its own: only principals with `roles/run.invoker` on it (the push account) get past Google's front end. A
+  forged message from anyone holding publisher on the topic or a project-level invoker role can only make it
+  remove public access, which is the fail-safe direction (it cannot grant anything, and `terraform apply`
+  restores the binding). Accepted, so no in-app token verification.
 - **Status codes.** 2xx acknowledges; anything else makes Pub/Sub redeliver with backoff. A malformed message or one
   below the threshold gets 200: the same bytes can never become valid, and the next notification carries fresh
   numbers. An IAM failure (including a second etag conflict) gets 500: the switch has not fired, and redelivery is

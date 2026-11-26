@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from fleet_broker import s3
 from fleet_broker.app import create_app
+from fleet_broker.store import Claim, JobStore
 from test_app import ALL, CAPS, JOB, Clock, key_for
 from tokens import ADMIN, WORKER
 
@@ -55,7 +56,7 @@ class FakeBucket:
     def store(self, job: dict, data: bytes = RESULT, context: str | None = None) -> None:
         """Put `data` where a correct upload would have."""
         sha = hashlib.sha256(data).hexdigest()
-        self.objects[f"results/{key_for(job, context)}"] = s3.ObjectInfo(
+        self.objects[f"results/{job['data_class']}/{key_for(job, context)}"] = s3.ObjectInfo(
             len(data), s3.b64_digest(sha)
         )
 
@@ -118,15 +119,15 @@ def complete(w, lease, **over):
 
 def test_lease_carries_a_presigned_input_url_for_the_inputs_prefix(leased):
     _, lease = leased
-    assert lease["input_url"] == f"https://fake.s3/get/inputs/{JOB['input_sha256']}?exp=600"
+    assert lease["input_url"] == f"https://fake.s3/get/inputs/footage/{JOB['input_sha256']}?exp=600"
     assert "context_url" not in lease or lease["context_url"] is None
 
 
 def test_lease_carries_a_context_url_when_the_job_has_context(db_url, bucket):
     enqueue(client(db_url, bucket, ADMIN), context_sha256=CONTEXT)
     lease = client(db_url, bucket).post("/lease", json=CAPS).json()
-    assert lease["context_url"] == f"https://fake.s3/get/inputs/{CONTEXT}?exp=600"
-    assert lease["input_url"].endswith(f"inputs/{JOB['input_sha256']}?exp=600")
+    assert lease["context_url"] == f"https://fake.s3/get/inputs/footage/{CONTEXT}?exp=600"
+    assert lease["input_url"].endswith(f"inputs/footage/{JOB['input_sha256']}?exp=600")
 
 
 @pytest.mark.parametrize("data_class", ["footage", "derived", "open"])
@@ -159,10 +160,10 @@ def test_upload_url_is_for_the_results_prefix_and_the_jobs_own_key(leased, bucke
     r = upload(w, lease)
     assert r.status_code == 200
     body = r.json()
-    assert body["url"] == f"https://fake.s3/put/results/{key_for(JOB)}"
+    assert body["url"] == f"https://fake.s3/put/results/footage/{key_for(JOB)}"
     assert body["headers"] == {"x-amz-checksum-sha256": s3.b64_digest(SHA)}
     assert body["expires_in"] == 300
-    assert bucket.targets == [(f"results/{key_for(JOB)}", SHA, SIZE)]
+    assert bucket.targets == [(f"results/footage/{key_for(JOB)}", SHA, SIZE)]
 
 
 def test_upload_url_for_a_job_with_context_uses_the_key_with_context(db_url, bucket):
@@ -170,7 +171,7 @@ def test_upload_url_for_a_job_with_context_uses_the_key_with_context(db_url, buc
     w = client(db_url, bucket)
     lease = w.post("/lease", json=CAPS).json()
     key = key_for(JOB, CONTEXT)
-    assert upload(w, lease, result_key=key).json()["url"].endswith(f"results/{key}")
+    assert upload(w, lease, result_key=key).json()["url"].endswith(f"results/footage/{key}")
     assert upload(w, lease, result_key=key_for(JOB)).status_code == 422  # the context-free key
 
 
@@ -271,7 +272,7 @@ def test_complete_accepts_a_stored_result_that_matches_the_declaration(leased, b
     upload(w, lease)
     bucket.store(JOB)
     assert complete(w, lease).status_code == 204
-    assert bucket.heads == [f"results/{key_for(JOB)}"] * 2  # at /upload-url, then /complete
+    assert bucket.heads == [f"results/footage/{key_for(JOB)}"] * 2  # at /upload-url, then /complete
     assert open_store().get("j0")["state"] == "done"
 
 
@@ -298,7 +299,7 @@ def test_complete_with_a_different_checksum_is_422_result_mismatch(leased, bucke
 def test_complete_with_a_stored_object_over_the_cap_is_422_result_mismatch(leased, bucket):
     w, lease = leased
     upload(w, lease)
-    bucket.objects[f"results/{key_for(JOB)}"] = s3.ObjectInfo(CAP + 1, s3.b64_digest(SHA))
+    bucket.objects[f"results/footage/{key_for(JOB)}"] = s3.ObjectInfo(CAP + 1, s3.b64_digest(SHA))
     assert complete(w, lease).json()["code"] == "result_mismatch"
 
 
@@ -308,7 +309,7 @@ def test_a_cap_lowered_after_the_upload_is_enforced_on_the_stored_object(db_url,
     lease = big.post("/lease", json=CAPS).json()
     sha = hashlib.sha256(b"y" * (CAP + 500)).hexdigest()
     assert upload(big, lease, sha256=sha, size=CAP + 500).status_code == 200  # fine under CAP*2
-    bucket.objects[f"results/{key_for(JOB)}"] = s3.ObjectInfo(CAP + 500, s3.b64_digest(sha))
+    bucket.objects[f"results/footage/{key_for(JOB)}"] = s3.ObjectInfo(CAP + 500, s3.b64_digest(sha))
     small = client(db_url, bucket)  # the cap is CAP again after a redeploy
     assert complete(small, lease).json()["code"] == "result_mismatch"
 
@@ -316,14 +317,14 @@ def test_a_cap_lowered_after_the_upload_is_enforced_on_the_stored_object(db_url,
 def test_complete_with_a_different_length_is_422_result_mismatch(leased, bucket):
     w, lease = leased
     upload(w, lease)
-    bucket.objects[f"results/{key_for(JOB)}"] = s3.ObjectInfo(SIZE + 1, s3.b64_digest(SHA))
+    bucket.objects[f"results/footage/{key_for(JOB)}"] = s3.ObjectInfo(SIZE + 1, s3.b64_digest(SHA))
     assert complete(w, lease).json()["code"] == "result_mismatch"
 
 
 def test_complete_with_an_object_that_has_no_checksum_is_422_result_mismatch(leased, bucket):
     w, lease = leased
     upload(w, lease)
-    bucket.objects[f"results/{key_for(JOB)}"] = s3.ObjectInfo(SIZE, None)
+    bucket.objects[f"results/footage/{key_for(JOB)}"] = s3.ObjectInfo(SIZE, None)
     assert complete(w, lease).json()["code"] == "result_mismatch"
 
 
@@ -386,3 +387,70 @@ def test_local_mode_complete_does_not_look_at_s3(db_url, bucket):
     w = client(db_url, None)
     lease = w.post("/lease", json=CAPS).json()
     assert complete(w, lease).status_code == 204
+
+
+# --- the data class is in the key (ADR 0025, Q82) ---
+
+
+@pytest.mark.parametrize("data_class", ["footage", "derived", "open"])
+def test_every_key_carries_the_jobs_own_data_class(db_url, bucket, data_class):
+    enqueue(client(db_url, bucket, ADMIN), data_class=data_class, context_sha256=CONTEXT)
+    w = client(db_url, bucket)
+    lease = w.post("/lease", json=CAPS).json()
+    sha = JOB["input_sha256"]
+    assert lease["input_url"] == f"https://fake.s3/get/inputs/{data_class}/{sha}?exp=600"
+    assert lease["context_url"] == f"https://fake.s3/get/inputs/{data_class}/{CONTEXT}?exp=600"
+    key = key_for(JOB, CONTEXT)
+    assert upload(w, lease, result_key=key).json()["url"].endswith(f"results/{data_class}/{key}")
+    assert bucket.targets[0][0] == f"results/{data_class}/{key}"
+
+
+def test_complete_checks_the_object_under_the_jobs_data_class(db_url, bucket, open_store):
+    enqueue(client(db_url, bucket, ADMIN), data_class="open")
+    w = client(db_url, bucket)
+    lease = w.post("/lease", json=CAPS).json()
+    upload(w, lease)
+    bucket.store(JOB | {"data_class": "open"})
+    assert complete(w, lease).status_code == 204
+    assert bucket.heads[-1] == f"results/open/{key_for(JOB)}"
+
+
+def test_an_open_only_broker_refuses_to_sign_for_a_job_of_another_class(db_url, bucket):
+    # Second guard: the open-only cloud broker cannot lease footage, but if a footage lease
+    # reached it anyway (a misconfigured clearance, a shared database) it signs nothing.
+    enqueue(client(db_url, bucket, ADMIN))  # footage
+    lease = client(db_url, bucket).post("/lease", json=CAPS).json()  # a broker cleared for all
+    app = create_app(
+        db_url,
+        WORKER,
+        ADMIN,
+        {"open"},
+        ttl_seconds=60,
+        clock=Clock(),
+        bucket=bucket,
+        max_result_bytes=CAP,
+    )
+    w = TestClient(app, headers={"Authorization": f"Bearer {WORKER}"})
+    r = upload(w, lease)
+    assert r.status_code == 403 and r.json()["code"] == "data_class_not_signable"
+    assert bucket.targets == [] and bucket.heads == []
+
+
+def test_an_open_only_broker_does_not_sign_a_lease_url_for_another_class(
+    db_url, bucket, monkeypatch
+):
+    claim = Claim(
+        job_id="j0",
+        input_sha256="a" * 64,
+        model="m",
+        prompt_version="v1",
+        lease_token="t",
+        lease_expires_at=1.0,
+        attempts=1,
+        data_class="footage",
+    )
+    monkeypatch.setattr(JobStore, "claim", lambda self, *a, **k: claim)
+    app = create_app(db_url, WORKER, ADMIN, {"open"}, ttl_seconds=60, clock=Clock(), bucket=bucket)
+    w = TestClient(app, headers={"Authorization": f"Bearer {WORKER}"})
+    r = w.post("/lease", json=CAPS)
+    assert r.status_code == 403 and r.json()["code"] == "data_class_not_signable"

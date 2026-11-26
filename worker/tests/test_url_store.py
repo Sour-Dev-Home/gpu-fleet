@@ -52,7 +52,7 @@ class FakeS3:
             return httpx.Response(self.put_status)
         if url in self.objects:
             return httpx.Response(200, content=self.objects[url])
-        return httpx.Response(403)  # S3 says 403 for a key that is not there (no ListBucket)
+        return httpx.Response(404)  # S3 says 404 for a missing key: the role may list the bucket
 
     def client(self) -> httpx.Client:
         return httpx.Client(transport=httpx.MockTransport(self))

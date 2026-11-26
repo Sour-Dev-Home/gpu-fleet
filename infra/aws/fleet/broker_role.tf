@@ -54,30 +54,27 @@ data "aws_iam_policy_document" "broker_permissions" {
     sid       = "ReadInputsAndResults"
     effect    = "Allow"
     actions   = ["s3:GetObject"]
-    resources = ["${module.results.arn}/inputs/*", "${module.results.arn}/results/*"]
+    resources = ["${module.results.arn}/inputs/open/*", "${module.results.arn}/results/open/*"]
   }
 
   # With ListBucket, S3 answers 404 for a key that does not exist; without it, 403. The broker treats
   # 404 as "not stored" and 403 as a fault (storage_unavailable), so a wrong role or bucket policy is loud.
-  # Limited to the two prefixes the fleet uses.
+  # No s3:prefix condition: HeadObject and GetObject carry no prefix, so a condition would never match
+  # them and a missing key would stay 403 (every first upload would get 503). The bucket holds only
+  # inputs/ and results/ (Terraform state is a separate bucket) and this role can already read the
+  # open keys, so listing adds nothing but content-hash names.
   statement {
-    sid       = "ListOurPrefixes"
+    sid       = "ListForHonest404"
     effect    = "Allow"
     actions   = ["s3:ListBucket"]
     resources = [module.results.arn]
-
-    condition {
-      test     = "StringLike"
-      variable = "s3:prefix"
-      values   = ["results/*", "inputs/*"]
-    }
   }
 
   statement {
-    sid       = "WriteResults"
+    sid       = "WriteOpenResults"
     effect    = "Allow"
     actions   = ["s3:PutObject"]
-    resources = ["${module.results.arn}/results/*"]
+    resources = ["${module.results.arn}/results/open/*"]
   }
 }
 

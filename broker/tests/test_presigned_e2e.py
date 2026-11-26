@@ -77,11 +77,11 @@ def run(db_url, fake: FakeS3, runner_output: bytes = b"echo result"):
 
 
 def test_a_job_goes_from_enqueue_to_done_through_s3(db_url, open_store):
-    fake = FakeS3({f"inputs/{SHA}": INPUT})
+    fake = FakeS3({f"inputs/open/{SHA}": INPUT})
     worker, calls = run(db_url, fake)
     assert worker.run_once() == "ran"
     key = result_key(SHA, "m", "v1")
-    assert fake.blobs[f"results/{key}"] == b"echo result"
+    assert fake.blobs[f"results/open/{key}"] == b"echo result"
     assert open_store().get("j0")["state"] == "done"
     assert len(calls) == 1
 
@@ -90,8 +90,8 @@ def test_a_rerun_after_a_crash_adopts_the_stored_result_even_if_the_model_says_s
     db_url, open_store
 ):
     # attempt 1 stored its result and died before /complete; attempt 2 generates other words
-    fake = FakeS3({f"inputs/{SHA}": INPUT})
-    key = f"results/{result_key(SHA, 'm', 'v1')}"
+    fake = FakeS3({f"inputs/open/{SHA}": INPUT})
+    key = f"results/open/{result_key(SHA, 'm', 'v1')}"
     first = b"the first attempt's description"
     fake.objects[key] = s3.ObjectInfo(len(first), s3.b64_digest(hashlib.sha256(first).hexdigest()))
     fake.blobs[key] = first
@@ -102,7 +102,7 @@ def test_a_rerun_after_a_crash_adopts_the_stored_result_even_if_the_model_says_s
 
 
 def test_an_input_the_bucket_corrupted_is_not_run_and_the_job_stays_leased(db_url, open_store):
-    fake = FakeS3({f"inputs/{SHA}": b"bit rot"})
+    fake = FakeS3({f"inputs/open/{SHA}": b"bit rot"})
     worker, calls = run(db_url, fake)
     with pytest.raises(InputMismatch):
         worker.run_once()

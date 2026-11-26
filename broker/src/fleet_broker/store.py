@@ -104,7 +104,8 @@ UPDATE jobs SET state = 'leased', lease_token = %(token)s,
 FROM candidate
 WHERE jobs.job_id = candidate.job_id
 RETURNING jobs.job_id, input_sha256, model, prompt_version,
-          lease_expires_at, attempts, context_sha256
+          lease_expires_at, attempts, context_sha256,
+          COALESCE(data_class, 'footage') AS data_class
 """
 
 
@@ -188,6 +189,7 @@ class Claim:
     lease_expires_at: float
     attempts: int
     context_sha256: str | None = None
+    data_class: str = "footage"  # the S3 key prefix (ADR 0025); a NULL in the table is footage
 
 
 @dataclass(frozen=True)
@@ -339,13 +341,14 @@ class JobStore:
             ).fetchone()
         return None if row is None else row["lease_expires_at"]
 
-    def holder_key(self, job_id: str, lease_token: str, result_key: str) -> str | None:
-        """The job's result key (recomputed from its own row, never the caller's) if the caller
-        holds its lease, else None. Raises ResultKeyMismatch if `result_key` is not that key
-        (ADR 0023). Changes nothing: /upload-url asks S3 about the key only after this."""
+    def holder_key(self, job_id: str, lease_token: str, result_key: str) -> tuple[str, str] | None:
+        """(result key, data class) of the job, both from its own row, never the caller's, if
+        the caller holds its lease, else None. Raises ResultKeyMismatch if `result_key` is not
+        that key (ADR 0023). Changes nothing: /upload-url asks S3 about the key only after this."""
         with self.pool.connection() as conn:
             job = conn.execute(
-                "SELECT input_sha256, model, prompt_version, context_sha256 FROM jobs"
+                "SELECT input_sha256, model, prompt_version, context_sha256,"
+                " COALESCE(data_class, 'footage') AS data_class FROM jobs"
                 " WHERE job_id = %s AND lease_token = %s AND state = 'leased'",
                 (job_id, _digest(lease_token)),
             ).fetchone()
@@ -354,7 +357,7 @@ class JobStore:
         key = result_key_for(job)
         if key != result_key:
             raise ResultKeyMismatch(job_id)
-        return key
+        return key, job["data_class"]
 
     def declare_result(self, job_id: str, lease_token: str, sha256: str, size: int) -> bool:
         """Record the SHA-256 (hex) and length of the result the lease holder is about to upload,
@@ -374,6 +377,7 @@ class JobStore:
         with self.pool.connection() as conn:
             return conn.execute(
                 "SELECT state, input_sha256, model, prompt_version, context_sha256,"
+                " COALESCE(data_class, 'footage') AS data_class,"
                 " result_sha256, result_size FROM jobs"
                 " WHERE job_id = %s AND lease_token = %s AND state IN ('leased', 'done')",
                 (job_id, _digest(lease_token)),

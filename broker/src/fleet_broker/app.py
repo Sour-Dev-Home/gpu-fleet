@@ -339,13 +339,15 @@ def create_app(
         }
         if bucket is None:
             return JSONResponse(LeaseOut(**fields).model_dump())
-        # Signed locally, for this job's own objects only, for whatever its data class: the
-        # clearance filter already decided that this worker may hold the lease (ADR 0025).
+        # Signed locally, for this job's own objects only. The claim's clearance filter already
+        # decided that this worker may hold the lease; the key's class is the job's own (Q82).
+        if not _signable(claim.data_class):
+            return _not_signable(claim.job_id)
         out = S3LeaseOut(
             **fields,
-            input_url=bucket.get_url(s3.input_key(claim.input_sha256)),
+            input_url=bucket.get_url(s3.input_key(claim.data_class, claim.input_sha256)),
             context_url=(
-                bucket.get_url(s3.input_key(claim.context_sha256))
+                bucket.get_url(s3.input_key(claim.data_class, claim.context_sha256))
                 if claim.context_sha256 is not None
                 else None
             ),
@@ -368,15 +370,18 @@ def create_app(
             )
         bucket.check()  # credentials first: an outage is a 503 here, before anything is written
         try:
-            key = s.holder_key(up.job_id, up.lease_token, up.result_key)
+            held = s.holder_key(up.job_id, up.lease_token, up.result_key)
         except ResultKeyMismatch:
             return _refuse(
                 "result_key_mismatch", "result_key is not this job's content address", up
             )
-        if key is None:
+        if held is None:
             raise HTTPException(status_code=409, detail="lease lost")
+        key, data_class = held
+        if not _signable(data_class):
+            return _not_signable(up.job_id)
         # The key is the one the broker recomputed from the job's row, not the caller's string.
-        object_key = s3.result_object_key(key)
+        object_key = s3.result_object_key(data_class, key)
         # A result is already stored (an earlier attempt of this job, or a rerun after a crash):
         # the first valid one wins. Results are content-addressed by input, model and prompt, so
         # any valid output for them is acceptable (ADR 0007). Declare IT, so /complete passes, and
@@ -420,6 +425,21 @@ def create_app(
         metrics.completed(accepted)
         return None
 
+    def _signable(data_class: str) -> bool:
+        # Second guard (Q82), behind the AWS role's own scope: a broker not cleared for a class
+        # touches none of its objects, even for a lease it somehow holds.
+        return data_class in clearance
+
+    def _not_signable(job_id: str) -> Response:
+        log.error("data_class_not_signable for job %s", job_id)
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": "this broker may not sign for this job",
+                "code": "data_class_not_signable",
+            },
+        )
+
     def _refuse(code: str, detail: str, ref: LeaseRef) -> Response:
         # The job id only: the key and the hashes are the client's claims, not ours to log.
         log.warning("%s for job %s", code, ref.job_id)
@@ -435,7 +455,9 @@ def create_app(
             return None  # not the holder (409 below), or a repeat of an already verified result
         if result_key_for(facts) != done.result_key:
             return None  # the store refuses it with the ADR 0023 code, before S3 is asked
-        head = bucket.head(s3.result_object_key(done.result_key))
+        if not _signable(facts["data_class"]):
+            return _not_signable(done.job_id)
+        head = bucket.head(s3.result_object_key(facts["data_class"], done.result_key))
         if head is None:
             return _refuse("result_missing", "no result object is stored for this job", done)
         declared = (facts["result_sha256"], facts["result_size"])

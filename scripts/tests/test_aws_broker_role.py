@@ -114,19 +114,33 @@ def test_the_permissions_are_exactly_get_on_inputs_and_results_and_put_on_result
             (tuple(re.findall(r'"([^"]+)"', actions)), tuple(re.findall(r'"([^"]+)"', resources)))
         )
     assert pairs == {
-        (("s3:GetObject",), ("${module.results.arn}/inputs/*", "${module.results.arn}/results/*")),
-        (("s3:PutObject",), ("${module.results.arn}/results/*",)),
+        (
+            ("s3:GetObject",),
+            ("${module.results.arn}/inputs/open/*", "${module.results.arn}/results/open/*"),
+        ),
+        (("s3:PutObject",), ("${module.results.arn}/results/open/*",)),
     }
 
 
-def test_list_bucket_is_on_the_bucket_itself_and_only_for_our_two_prefixes():
-    # With it a missing key is a real 404; without it S3 says 403 and "missing" is a guess.
+def test_the_role_cannot_touch_footage_or_derived_objects():
+    # Q82: the data class is in the key, and this (cloud) role is cleared for `open` only. The
+    # own-backend role of phase 6 is where the other classes get read access.
+    p = permissions()
+    for other in ("footage", "derived"):
+        assert other not in p
+    for resource in re.findall(r'"\$\{module\.results\.arn\}/([^"]*)"', p):
+        assert resource in ("inputs/open/*", "results/open/*"), resource
+
+
+def test_list_bucket_is_on_the_bucket_itself_with_no_condition():
+    # An s3:prefix condition never matches HeadObject or GetObject (they carry no prefix), so a
+    # missing key would stay 403 and every first upload would get 503. The bucket holds only
+    # inputs/ and results/, and the role can already read those keys: listing adds only hash names.
     (stmt,) = [s for s in statements(permissions()) if "s3:ListBucket" in s]
     assert re.search(r'actions\s*=\s*\["s3:ListBucket"\]', stmt)
     assert re.search(r"resources\s*=\s*\[module\.results\.arn\]", stmt)
-    assert re.search(r'test\s*=\s*"StringLike"', stmt)
-    assert re.search(r'variable\s*=\s*"s3:prefix"', stmt)
-    assert re.search(r'values\s*=\s*\["results/\*",\s*"inputs/\*"\]', stmt)
+    assert "condition" not in stmt
+    assert "s3:prefix" not in stmt
 
 
 def test_there_is_no_delete_or_wildcard_action():

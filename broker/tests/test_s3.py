@@ -367,3 +367,13 @@ def test_a_client_error_from_sts_propagates():
         federation.make_credentials(
             role_arn="r", audience="a", region="us-east-1", sts=Failing(), fetch=lambda a: "t"
         )
+
+
+def test_keys_carry_the_data_class_and_refuse_an_unknown_one():
+    assert s3.input_key("open", A) == f"inputs/open/{A}"
+    assert s3.result_object_key("derived", A) == f"results/derived/{A}"
+    for bad in ("", "../open", "open/../footage", "OPEN"):
+        with pytest.raises(ValueError):
+            s3.input_key(bad, A)
+        with pytest.raises(ValueError):
+            s3.result_object_key(bad, A)

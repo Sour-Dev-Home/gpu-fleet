@@ -184,7 +184,14 @@ def test_readme_runbook_keeps_secrets_off_command_lines():
         re.findall(r"```.*?```", text, re.DOTALL)
     )  # commands only; prose may name the flag
     assert "--password=" not in fenced
-    assert "--prompt-for-password" in text
+    # Security review Low 3: no clipboard (Windows clipboard history and cloud sync keep it). The
+    # password goes from the vault to the Cloud SQL Admin API through Python's environment, no argv.
+    assert "Clipboard" not in text and "--prompt-for-password" not in text
+    assert "sqladmin.googleapis.com" in fenced and "os.environ[" in fenced
+    assert re.search(r"with-secrets\.ps1 -Names FLEET_CLOUDSQL_POSTGRES_PASSWORD", fenced)
+    assert "UNVERIFIED" in text
+    # Security review Low 4: the temp file of the length check is removed even if the check fails.
+    assert re.search(r"try \{.*python -c.*\} finally \{\s*Remove-Item \$f", fenced, re.DOTALL)
     assert "bootstrap-cloudsql.ps1" in text and "cloud-sql-proxy $conn" not in text
     assert "set-quota-project" in text
     # A PowerShell pipe to gcloud stored the token plus "\r\n" (measured): Python hands it over on stdin.
@@ -195,11 +202,15 @@ def test_readme_runbook_keeps_secrets_off_command_lines():
     assert '"$url/nope"' in fenced and "subprocess.run" in fenced
     assert "--expand-header" not in text and "curl.exe -i -X POST --variable" not in fenced
     assert '-d "@body.json"' in text and '\\"' not in fenced
-    assert "Set-Clipboard -Value $null" in text
     for line in text.splitlines():  # a plaintext secret is never printed to the console
-        if "-AsPlainText" in line:
-            assert "| Set-Clipboard" in line, line
+        assert "-AsPlainText" not in line, line
     assert "secrets versions disable" in text and "secrets versions destroy" in text
+
+
+def test_adr_0024_records_that_the_kill_switch_relies_on_cloud_run_iam():
+    adr = next((ROOT / "docs" / "adr").glob("0024-*.md")).read_text(encoding="utf-8")
+    assert "no JWT check" in adr or "does no JWT check" in adr
+    assert "fail-safe" in adr and "Accepted" in adr
 
 
 def test_bootstrap_script_uses_the_pinned_images_and_least_privilege():

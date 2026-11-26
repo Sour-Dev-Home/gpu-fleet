@@ -66,9 +66,12 @@ delete it (a base64 token of 32 bytes is 44 bytes, with no whitespace at either 
 
 ```powershell
 $f = Join-Path $env:TEMP "fleet-secret-check"
-gcloud secrets versions access latest --secret=fleet-worker-token --out-file=$f
-python -c "import sys;b=open(sys.argv[1],'rb').read();print(len(b),b==b.strip())" $f
-Remove-Item $f
+try {
+  gcloud secrets versions access latest --secret=fleet-worker-token --out-file=$f
+  python -c "import sys;b=open(sys.argv[1],'rb').read();print(len(b),b==b.strip())" $f
+} finally {
+  Remove-Item $f -ErrorAction SilentlyContinue   # always, even if gcloud or python failed
+}
 ```
 
 A different number (45 or 46) means a stray newline got in, and the broker would reject its own workers.
@@ -79,18 +82,16 @@ A different number (45 or 46) means a stray newline got in, and the broker would
 
 ```powershell
 Set-Secret -Vault fleet -Name FLEET_CLOUDSQL_POSTGRES_PASSWORD -Secret ([Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)))
-gcloud sql users set-password postgres --instance=fleet --prompt-for-password
+$set = "import json,os,subprocess,shutil,urllib.request as u; g=shutil.which('gcloud'); p=subprocess.check_output([g,'config','get-value','project'],text=True).strip(); t=subprocess.check_output([g,'auth','print-access-token'],text=True).strip(); r=u.Request(f'https://sqladmin.googleapis.com/v1/projects/{p}/instances/fleet/users?name=postgres',data=json.dumps({'password':os.environ['FLEET_CLOUDSQL_POSTGRES_PASSWORD']}).encode(),method='PUT',headers={'Authorization':'Bearer '+t,'Content-Type':'application/json'}); print(u.urlopen(r,timeout=60).status)"
+../../../scripts/with-secrets.ps1 -Names FLEET_CLOUDSQL_POSTGRES_PASSWORD -- python -c $set
 ```
 
-Before the prompt, put the value on the clipboard without printing it, paste at the prompt, then clear the clipboard:
-
-```powershell
-Get-Secret -Vault fleet FLEET_CLOUDSQL_POSTGRES_PASSWORD -AsPlainText | Set-Clipboard
-# paste at the gcloud prompt, then:
-Set-Clipboard -Value $null
-```
-
-Don't use `--password=`: gcloud records its command line in its logs.
+The value goes from the vault into Python's environment and from there into the Cloud SQL Admin API request body
+(`users.update`): never the clipboard (Windows clipboard history and cloud sync keep it), never a command line
+(`gcloud sql users set-password` has only `--password=` and an interactive prompt, no file or stdin option, and gcloud records its command
+line in its logs). **UNVERIFIED:** this call is written against the API reference and has not been run; expect
+`200` (or `204`), and check the first run before relying on it. The access token is short-lived and is in argv of
+nothing: it is read from `gcloud auth print-access-token` inside Python.
 
 ## 6. One-time bootstrap: let the IAM user create tables
 

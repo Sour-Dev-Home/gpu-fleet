@@ -12,8 +12,15 @@ worker wrote results to a local directory and the broker took its word that they
 on Google Cloud (ADR 0019/0021) and S3 is on AWS, so it needs AWS credentials without a stored key (CLAUDE.md).
 
 ## Decision
-- **One bucket, content-addressed prefixes (Q74).** `inputs/<input sha256>` and `results/<result key>` in the
-  existing results bucket. A hash names its object, so there is no per-job path to guess or collide.
+- **One bucket, content-addressed prefixes (Q74), with the data class in the key (Q82, maintainer, 2026-11-26).**
+  `inputs/<data_class>/<input sha256>`, `results/<data_class>/<result key>`, and the same for a job's context
+  input. A hash names its object, so there is no per-job path to guess or collide. The broker builds every key
+  from the job row's `data_class` (NULL means footage), never from anything the caller sends. The cloud
+  broker's AWS role may Get only `inputs/open/*` and `results/open/*` and Put only `results/open/*`, so even a
+  bug or a stolen broker identity cannot reach footage or derived text. As a second guard the broker refuses to
+  sign (403 `data_class_not_signable`) for a job whose class is not in its own clearance; the cloud broker is
+  cleared for `open` only, so it cannot lease those jobs anyway. **Phase 6's own-backend role (later)** is where
+  `footage` and `derived` get read (and write) access, for the maintainer's own backends only.
 - **`/lease` carries download URLs (Q75).** In S3 mode the response adds `input_url` (and `context_url` when the job
   has a `context_sha256`): presigned GETs, 10 minutes. **`POST /upload-url`** (worker token plus the job's valid
   lease token; body `job_id, lease_token, result_key, sha256, size`) returns `{url, headers, expires_in}`: a
@@ -23,7 +30,7 @@ on Google Cloud (ADR 0019/0021) and S3 is on AWS, so it needs AWS credentials wi
 - **The upload is pinned (Q76).** The PUT signs `ContentLength` and `ChecksumSHA256` (base64 of the digest bytes)
   and `If-None-Match: *` (no overwrite); the returned `headers` are exactly the signed ones. **Whether S3 enforces
   each on a presigned PUT is unverified**, so `scripts/probe-presign.py` (run by the maintainer with their own
-  login, against throwaway keys under `results/probe/`) reports it. The system does not depend on the answer:
+  login, against throwaway keys under `results/probe/`, not `results/open/`: it signs with the maintainer's own login, not the broker role, so the role's `open` scope does not apply) reports it. The system does not depend on the answer:
   the declared `sha256` and `size` are stored on the job row at `/upload-url` (nullable columns, expand-only
   migration, ADR 0012), and `/complete` first HEADs `results/<key>` (ChecksumMode ENABLED) and answers
   **422 `result_missing`** (no such object) or **422 `result_mismatch`** (over the cap, a different length, a
@@ -44,13 +51,14 @@ on Google Cloud (ADR 0019/0021) and S3 is on AWS, so it needs AWS credentials wi
   21 digits each, no default) AND `accounts.google.com:aud` (the token's `azp`, the same ID) is one of them,
   as defense in depth, AND `accounts.google.com:oaud` equals `var.federation_audience` (default
   `fleet-aws-federation`). The IDs are identifiers, not credentials, so the variable is not `sensitive` (that
-  would hide the whole trust policy in every plan); they come from `TF_VAR_` only to stay out of git. Permissions: `s3:GetObject` on `inputs/*` and
-  `results/*`, `s3:PutObject` on `results/*`, and `s3:ListBucket` on the bucket (condition `s3:prefix` StringLike
-  `results/*`, `inputs/*`), nothing else. With ListBucket a missing key is a real 404: the broker reads **404 as "not
-  stored"** and **403 as a fault** (a wrong role or bucket policy), answered like any storage trouble. **Unverified:**
-  whether S3 evaluates the `s3:prefix` condition for HeadObject, which carries no prefix. If it does not, a HEAD of a
-  missing key stays 403 and every first upload would answer 503 `storage_unavailable`: check with the role right
-  after the apply (HEAD a key that does not exist) and drop the condition if so.
+  would hide the whole trust policy in every plan); they come from `TF_VAR_` only to stay out of git. Permissions: `s3:GetObject` on `inputs/open/*` and
+  `results/open/*`, `s3:PutObject` on `results/open/*`, and `s3:ListBucket` on the bucket with **no condition**,
+  nothing else. (An `s3:prefix` condition never matches HeadObject or GetObject, which carry no prefix, so a missing
+  key would stay 403 and every first upload would get 503.) The bucket holds only `inputs/` and `results/`
+  (Terraform state is a separate bucket) and the role can already read the open keys, so listing adds only
+  content-hash names. With ListBucket a missing key is a real 404: the broker reads **404 as "not stored"** and
+  **403 as a fault** (a wrong role or bucket policy), answered like any storage trouble. Post-apply smoke check
+  (infra/aws/README.md): with the role, HEAD a key that does not exist and expect 404.
 - **A result that is already stored wins.** A model's output is not deterministic, so a job rerun after a crash
   between PUT and `/complete` would otherwise meet its own earlier object (412, then `result_mismatch`, until
   dead-letter). `/upload-url` therefore HEADs the key first: if an object exists, is within the cap and has a
@@ -59,6 +67,12 @@ on Google Cloud (ADR 0019/0021) and S3 is on AWS, so it needs AWS credentials wi
   PUT is handled the same way (ask again). The content-addressed key means any valid output for the same input,
   model and prompt is acceptable (ADR 0007's idempotency). An object that exists but has no checksum or is over
   the cap is not adopted; the job then fails at the PUT (412) and dead-letters, which needs a manual look.
+  **Consequence (security review, Medium 2): first-stored-wins makes a poisoned result permanent.** If a bad
+  worker (a volunteer, or a leaked token) stores a wrong object first, every later attempt adopts it and the
+  job completes with it; nothing re-checks the content. This is acceptable while only the maintainer's own
+  workers hold tokens, and must be closed before phase 10. Backlog (docs/security.md): an admin path to
+  quarantine or delete a result object and reset its job, and recording which worker token or lease wrote each
+  result so a bad worker's output can be found and purged.
 - **Storage trouble does not cost attempts.** Credentials are resolved (`get_frozen_credentials`) before `/lease`
   claims, and at the start of `/upload-url`. An STS or metadata outage, a presign error, or a HEAD that cannot
   answer is **503 `storage_unavailable`** with `Retry-After`, the exception's type only in the log. Without this a

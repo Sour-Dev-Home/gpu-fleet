@@ -38,8 +38,8 @@ terraform apply tfplan
 
 The broker runs on Google Cloud and signs S3 URLs, so it needs AWS credentials without a stored key. The role
 `fleet-broker` trusts `accounts.google.com` (built in to AWS: no provider resource) for tokens whose subject is
-one of your service accounts' numeric IDs AND whose audience is `federation_audience`. It may read `inputs/*` and
-`results/*` and write `results/*` of the results bucket, nothing else.
+one of your service accounts' numeric IDs AND whose audience is `federation_audience`. It may read `inputs/open/*` and
+`results/open/*` and write `results/open/*` of the results bucket (the data class is in the key, Q82), nothing else.
 
 Apply steps (from `infra/aws/fleet`, signed in as above). The unique ID is not the email; it is not secret in
 the way a key is, but it stays out of git:
@@ -56,8 +56,8 @@ terraform output broker_role_arn   # FLEET_AWS_ROLE_ARN: contains the account ID
 
 Workers in S3 mode need `FLEET_RESULTS_HOST` = `<bucket>.s3.amazonaws.com` (us-east-1; `<bucket>.s3.<region>.amazonaws.com`
 elsewhere): they refuse presigned URLs for any other host. After the apply, check once with the role (not your
-login) that a HEAD of a key that does not exist answers 404, not 403 (ADR 0025, the `s3:prefix` condition on
-ListBucket is unverified for HeadObject).
+login) that a HEAD of a key that does not exist answers 404, not 403 (ADR 0025: ListBucket on the bucket has no
+condition, so S3 says 404 for a missing key; a 403 means the role or bucket policy is wrong).
 
 The Cloud Run wiring (`FLEET_RESULTS_BUCKET`, `FLEET_AWS_ROLE_ARN`, `FLEET_AWS_AUDIENCE`, `AWS_REGION`) is a
 follow-up change in `infra/gcp`; until then the broker runs in local mode.

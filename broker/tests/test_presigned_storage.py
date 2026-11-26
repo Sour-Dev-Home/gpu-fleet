@@ -53,13 +53,13 @@ def test_an_already_stored_result_is_recorded_and_no_url_is_issued(leased, bucke
 
 def test_a_stored_object_over_the_cap_is_not_adopted(leased, bucket):
     w, lease = leased
-    bucket.objects[f"results/{key_for(JOB)}"] = s3.ObjectInfo(CAP + 1, s3.b64_digest(SHA))
+    bucket.objects[f"results/footage/{key_for(JOB)}"] = s3.ObjectInfo(CAP + 1, s3.b64_digest(SHA))
     assert "url" in upload(w, lease).json()
 
 
 def test_a_stored_object_without_a_checksum_is_not_adopted(leased, bucket):
     w, lease = leased
-    bucket.objects[f"results/{key_for(JOB)}"] = s3.ObjectInfo(SIZE, None)
+    bucket.objects[f"results/footage/{key_for(JOB)}"] = s3.ObjectInfo(SIZE, None)
     assert "url" in upload(w, lease).json()
 
 

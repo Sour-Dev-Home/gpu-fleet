@@ -1,6 +1,9 @@
 """The broker's view of the results bucket: presigned URLs and one HEAD (ADR 0025).
 
-Layout (one bucket, content-addressed, Q74):  inputs/<input sha256>   results/<result key>
+Layout (one bucket, content-addressed, Q74, Q82):
+    inputs/<data class>/<input sha256>    results/<data class>/<result key>
+The data class comes from the job's row, never from the caller. The cloud broker's AWS role
+may read and write only the `open` prefixes (infra/aws/fleet/broker_role.tf).
 
 Workers never hold AWS credentials. The broker signs a URL per object, locally (no network:
 the signature is computed from the credentials), and the worker uses it with plain HTTPS.
@@ -29,6 +32,7 @@ PUT_SECONDS = 300  # and 5 to start the upload; a transfer already begun is not 
 DEFAULT_MAX_RESULT_BYTES = 10_000_000  # a description is kilobytes; 10 MB is a bug or an attack
 MAX_RESULT_BYTES_LIMIT = 5 * 1024**3  # S3's single-PUT ceiling: a larger cap could never be used
 DISABLED = "presigned_urls_disabled"  # the code of /upload-url's 404 in local mode
+DATA_CLASSES = frozenset({"footage", "derived", "open"})  # GLOSSARY.md "Data class"
 S3_ENV = ("FLEET_RESULTS_BUCKET", "FLEET_AWS_ROLE_ARN", "FLEET_AWS_AUDIENCE")
 
 
@@ -36,12 +40,18 @@ class BucketUnavailable(Exception):
     """S3 could not answer (network, 5xx, throttling, credentials): retry later."""
 
 
-def input_key(sha256: str) -> str:
-    return f"inputs/{sha256}"
+def _checked(data_class: str) -> str:
+    if data_class not in DATA_CLASSES:  # the app's types already say so; a key must not trust that
+        raise ValueError(f"unknown data class {data_class!r}")
+    return data_class
 
 
-def result_object_key(result_key: str) -> str:
-    return f"results/{result_key}"
+def input_key(data_class: str, sha256: str) -> str:
+    return f"inputs/{_checked(data_class)}/{sha256}"
+
+
+def result_object_key(data_class: str, result_key: str) -> str:
+    return f"results/{_checked(data_class)}/{result_key}"
 
 
 def hex_digest(b64: str) -> str:
