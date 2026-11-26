@@ -8,7 +8,8 @@
   A job is leased only to a worker whose clearance covers its class and which declared its
   prompt version and model; others stay queued.
 
-Reads FLEET_ADMIN_TOKEN and FLEET_BROKER_URL (default http://127.0.0.1:8000). In Compose it
+Reads FLEET_ADMIN_TOKEN and FLEET_BROKER_URL (default http://127.0.0.1:8000). Plain http is
+refused unless the host is loopback or FLEET_ALLOW_HTTP=1; redirects are never followed. In Compose it
 runs inside the broker container, which already holds the admin token (ADR 0014):
   docker compose run --rm broker fleet-enqueue --demo 20
 
@@ -19,6 +20,7 @@ Standard library only, so the broker image needs no HTTP client for it.
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -26,6 +28,7 @@ import random
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 DEMO_MODEL = "qwen3:8b"
@@ -98,7 +101,46 @@ def post_job_with_retries(base_url: str, token: str, job: dict[str, str]) -> int
     return status
 
 
-def post_job(base_url: str, token: str, job: dict[str, str]) -> int:
+def _is_loopback_ip(host: str) -> bool:
+    """127.0.0.0/8 and ::1 in any spelling; hostnames like 127.0.0.1.evil.com are not IPs."""
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def check_url(base_url: str, allow_http: bool) -> None:
+    """The admin token rides on every request: never in cleartext to a remote host.
+    Plain http is fine for loopback, or when the caller opts in (Compose's http://broker:8000)."""
+    url = urllib.parse.urlsplit(base_url)
+    host = url.hostname or ""
+    loopback = host == "localhost" or _is_loopback_ip(host)
+    if url.scheme == "https" or (url.scheme == "http" and (loopback or allow_http)):
+        return
+    raise ValueError(
+        f"refusing to send the admin token over {url.scheme}://{host} "
+        "(use https, or set FLEET_ALLOW_HTTP=1 for a trusted private network)"
+    )
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A 3xx is an error, never followed: urllib would resend the Authorization header."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirect)
+
+
+def _open(req: urllib.request.Request, timeout: float):  # patched in tests
+    return _opener.open(req, timeout=timeout)
+
+
+def post_job(base_url: str, token: str, job: dict[str, str], allow_http: bool | None = None) -> int:
+    if allow_http is None:
+        allow_http = os.environ.get("FLEET_ALLOW_HTTP") == "1"
+    check_url(base_url, allow_http)
     req = urllib.request.Request(
         f"{base_url.rstrip('/')}/jobs",
         data=json.dumps(job).encode(),
@@ -106,7 +148,7 @@ def post_job(base_url: str, token: str, job: dict[str, str]) -> int:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with _open(req, timeout=10) as r:
             return r.status
     except urllib.error.HTTPError as e:
         status = Status(e.code)
@@ -152,6 +194,11 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
         print("fleet-enqueue: missing FLEET_ADMIN_TOKEN", file=sys.stderr)
         return 2
     base_url = env.get("FLEET_BROKER_URL", "http://127.0.0.1:8000")
+    try:
+        check_url(base_url, env.get("FLEET_ALLOW_HTTP") == "1")
+    except ValueError as e:
+        print(f"fleet-enqueue: {e}", file=sys.stderr)
+        return 2
 
     statuses = [
         post_job_with_retries(base_url, token, job)

@@ -66,7 +66,7 @@ class Config:
         required = ["FLEET_BROKER_URL", "FLEET_WORKER_TOKEN"]
         if runner in NEEDS_MODEL_SERVER:
             required.append("FLEET_MODEL_URL")
-        missing = [n for n in required if not env.get(n)]
+        missing = [n for n in required if not env.get(n, "").strip()]
         if missing:
             raise SystemExit(f"fleet-worker: missing {', '.join(missing)}")
         if runner not in RUNNERS:
@@ -74,7 +74,7 @@ class Config:
                 f"fleet-worker: unknown FLEET_RUNNER {runner!r}; have {sorted(RUNNERS)}"
             )
         self.broker_url = env["FLEET_BROKER_URL"]
-        self.token = env["FLEET_WORKER_TOKEN"]
+        self.token = env["FLEET_WORKER_TOKEN"].strip()  # "token\n" from a secret store
         self.results_dir = env.get("FLEET_RESULTS_DIR", "results")
         self.runner_name = runner
         self.model_url = env.get("FLEET_MODEL_URL", "")

@@ -32,6 +32,8 @@ services:
       start_interval: 1s
     restart: unless-stopped
     stop_grace_period: 30s # a clean shutdown checkpoint, not crash recovery on the next start
+    # Only this: the image starts as root and drops privileges itself, so cap_drop ALL would break its entrypoint.
+    security_opt: ["no-new-privileges:true"]
 
   broker:
     build: ./broker
@@ -51,6 +53,7 @@ services:
       # Not used by the broker itself: lets `docker compose run --rm broker fleet-enqueue` reach the
       # running broker by its service name.
       FLEET_BROKER_URL: http://broker:8000
+      FLEET_ALLOW_HTTP: "1" # fleet-enqueue refuses plain http to non-loopback hosts; this private network is the opt-in
     ports:
       - "127.0.0.1:8000:8000" # loopback only: never exposed to the LAN
     healthcheck:
@@ -62,6 +65,11 @@ services:
       start_period: 10s
       start_interval: 1s
     restart: unless-stopped # back after a crash or a Docker restart; the job store is in postgres-data
+    # Hardening: nothing to write to but /tmp, no capabilities, no privilege gain.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
 
   worker:
     build: ./worker
@@ -89,6 +97,11 @@ services:
     restart: on-failure:3
     # Time to finish the job in hand after SIGTERM; a longer job is retried when its lease expires.
     stop_grace_period: 30s
+    # Hardening: the results volume is the only writable path besides /tmp.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
     deploy:
       replicas: 1 # docker compose up --scale worker=N for more
 

@@ -147,8 +147,8 @@ def test_post_job_reads_retry_after_from_a_503(monkeypatch):
     def fake_urlopen(req, timeout):
         raise urllib.error.HTTPError(req.full_url, 503, "busy", headers, None)
 
-    monkeypatch.setattr(enqueue.urllib.request, "urlopen", fake_urlopen)
-    status = enqueue.post_job("http://x", "t", {"job_id": "j"})
+    monkeypatch.setattr(enqueue, "_open", fake_urlopen)
+    status = enqueue.post_job("http://127.0.0.1:1", "t", {"job_id": "j"})
     assert (int(status), status.retry_after) == (503, 7.0)
 
 

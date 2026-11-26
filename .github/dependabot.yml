@@ -38,7 +38,7 @@ updates:
       # stays on 3.11, the version CI tests.
       - dependency-name: python
         update-types: [version-update:semver-major, version-update:semver-minor]
-      # uv: no version updates, since ci.yml pins it separately (pip install uv==0.13.10);
-      # bump both together by hand.
+      # uv: no version updates, since .github/ci/requirements.txt pins it
+      # separately (hashes; regenerate with the uv pip compile line in its header); bump both by hand.
       - dependency-name: "*astral-sh/uv"
         update-types: [version-update:semver-major, version-update:semver-minor, version-update:semver-patch]

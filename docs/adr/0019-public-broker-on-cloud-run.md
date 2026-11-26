@@ -45,7 +45,8 @@ stop spending.
   details in step 2's own ADR.
 
 ## Consequences
-- Cost control rests on the Cloud Run max-instances cap and the rate limits, since budgets only alert. The
+- The Cloud Run max-instances cap and the rate limits bound throughput and compute, not the whole bill:
+  unauthenticated requests are still billed per request (docs/security.md, open item). Budgets only alert. The
   existing console budget is adopted into Terraform by import, as with AWS (ADR 0017).
 - Every request from the internet reaches the app, so the token check must stay cheap and constant-time,
   and rate limits apply after authentication.

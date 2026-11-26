@@ -259,6 +259,27 @@ def test_from_env_accepts_the_previous_tokens_during_a_rotation(monkeypatch, db_
     assert w.post("/lease", json=CAPS).status_code == 200
 
 
+def test_from_env_strips_whitespace_from_every_token(monkeypatch, db_url):
+    # A secret store often hands back "token\n"; an HTTP header can never carry it, so every
+    # worker would get a 401 forever.
+    old_worker, old_admin = "old-worker-" + "w" * 32, "old-admin-" + "a" * 32
+    env(monkeypatch, db_url, "open")
+    monkeypatch.setenv("FLEET_WORKER_TOKEN", WORKER + "\n")
+    monkeypatch.setenv("FLEET_ADMIN_TOKEN", " " + ADMIN + "\r\n")
+    monkeypatch.setenv("FLEET_WORKER_TOKEN_PREVIOUS", old_worker + "\n")
+    monkeypatch.setenv("FLEET_ADMIN_TOKEN_PREVIOUS", old_admin + "\n")
+    app = _from_env()
+
+    def code(token, path, **kw):
+        c = TestClient(app, headers={"Authorization": f"Bearer {token}"})
+        return c.post(path, **kw).status_code
+
+    assert code(ADMIN, "/jobs", json=JOB) == 201
+    assert code(old_admin, "/jobs", json=JOB) == 201
+    assert code(WORKER, "/lease", json=CAPS) == 200
+    assert code(old_worker, "/lease", json=CAPS) in (200, 204)
+
+
 def test_from_env_reads_the_rate_limit(monkeypatch, db_url):
     env(monkeypatch, db_url, "open")
     monkeypatch.setenv("FLEET_WORKER_BURST", "1")
