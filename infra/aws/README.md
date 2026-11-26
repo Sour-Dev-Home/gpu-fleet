@@ -86,8 +86,8 @@ keys under `results/probe/` and deletes them, using your own login (from the rep
 
 ```powershell
 $env:AWS_PROFILE = "fleet"; $env:AWS_REGION = "us-east-1"
-# `--with "botocore[crt]"`: the `aws login` credential provider needs the AWS CRT, which the broker doesn't ship
-uv run --with "botocore[crt]" --directory broker python ../scripts/probe-presign.py --bucket (terraform -chdir=infra/aws/fleet output -raw results_bucket)
+# `--with "botocore[crt]"`: the `aws login` credential provider needs the AWS CRT, which the broker doesn't ship (pinned to broker/uv.lock's botocore, so the overlay can't shadow it)
+uv run --with "botocore[crt]==1.44.12" --directory broker python ../scripts/probe-presign.py --bucket (terraform -chdir=infra/aws/fleet output -raw results_bucket)
 ```
 
 Last run (2026-11-26): ENFORCED on all three (403 longer body, 400 other SHA-256, 412 overwrite).
