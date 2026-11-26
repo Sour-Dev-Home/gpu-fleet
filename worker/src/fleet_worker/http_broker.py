@@ -53,13 +53,14 @@ class HttpBroker:
         self.clock = clock
 
     def _post(self, path: str, **kwargs) -> httpx.Response:
-        """POST, turning "the broker is down or failing" into TransientError (retry later).
-        4xx answers are returned as they are: they mean something specific (ADR 0007)."""
+        """POST, turning "the broker is down, failing or busy" into TransientError (retry later).
+        Other 4xx answers are returned as they are: they mean something specific (ADR 0007).
+        429 (rate limited) is the exception: like a 503, it only means "not now"."""
         try:
             r = self.client.post(path, headers=telemetry.inject({}), **kwargs)
         except httpx.TransportError as e:  # connection refused, timeout, DNS, reset
             raise TransientError(f"{path}: {e!r}") from e
-        if r.status_code >= 500:
+        if r.status_code >= 500 or r.status_code == 429:
             raise TransientError(f"{path}: HTTP {r.status_code}")
         return r
 

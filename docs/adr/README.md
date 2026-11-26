@@ -24,5 +24,6 @@ updated to point to it.
 | [0016](0016-sqlite-busy-handling.md) | SQLite busy handling: WAL, 503 with Retry-After, client retries | Accepted |
 | [0017](0017-terraform-aws-layout-and-state.md) | Terraform for AWS: two stacks, S3 state with native locking, keyless sign-in | Accepted |
 | [0018](0018-observability-opentelemetry.md) | Observability with OpenTelemetry: metrics, logs and traces | Accepted (phase 3b) |
+| [0019](0019-public-broker-on-cloud-run.md) | Public broker on Cloud Run: app tokens, keyless AWS access, phase 4 order | Accepted (phase 4) |
 
 Template: Status, Date, Context, Decision, Consequences, Alternatives considered. Keep each one to a page.

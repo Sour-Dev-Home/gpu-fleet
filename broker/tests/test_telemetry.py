@@ -107,6 +107,33 @@ def test_gauge_labels_cover_every_state_and_data_class():
         assert f"'{state}'" in store.SCHEMA and state in telemetry.JOB_STATES
 
 
+def test_traceparent_is_honoured_for_every_current_worker_token():
+    # During a token rotation both worker tokens are valid, so both may join traces.
+    from opentelemetry import trace
+
+    propagator = telemetry._authenticated_propagator(("token-new-" * 4, "token-old-" * 4))
+    parent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+
+    def joined(auth: str) -> bool:
+        carrier = {"traceparent": [parent], "authorization": [auth]}
+        ctx = propagator.extract(carrier, getter=_ListGetter())
+        return trace.get_current_span(ctx).get_span_context().is_valid
+
+    assert joined("Bearer " + "token-new-" * 4)
+    assert joined("Bearer " + "token-old-" * 4)
+    assert not joined("Bearer " + "token-xyz-" * 4)
+
+
+class _ListGetter:
+    """The ASGI getter's shape: header name -> list of values."""
+
+    def get(self, carrier, key):
+        return carrier.get(key)
+
+    def keys(self, carrier):
+        return list(carrier)
+
+
 def test_the_slo_threshold_is_a_bucket_edge():
     # "done within 15 minutes" is exact only if 900 s is an edge (ADR 0018).
     assert 900 in telemetry.TURNAROUND_BUCKETS
@@ -138,6 +165,24 @@ def test_busy_database_responses_are_counted(tmp_path):
     assert r.status_code == 503
     (busy,) = points(reader)["fleet.http.busy"]
     assert busy.value == 1
+
+
+def test_rate_limited_responses_are_counted(tmp_path):
+    clock, reader = Clock(), InMemoryMetricReader()
+    db = tmp_path / "broker.db"
+    metrics = telemetry.OtelMetrics(
+        MeterProvider(metric_readers=[reader]), lambda: (clock(), JobStore(db).stats(clock()))
+    )
+    app = create_app(db, WORKER, ADMIN, {"open"}, clock=clock, metrics=metrics, worker_burst=1)
+    client = TestClient(app)
+    assert [lease_status(client) for _ in range(3)] == [204, 429, 429]
+    (limited,) = points(reader)["fleet.http.limited"]
+    assert limited.value == 2
+
+
+def lease_status(client) -> int:
+    headers = {"Authorization": f"Bearer {WORKER}"}
+    return client.post("/lease", json=LEASE, headers=headers).status_code
 
 
 def test_broker_shutdown_flushes_metrics(tmp_path):

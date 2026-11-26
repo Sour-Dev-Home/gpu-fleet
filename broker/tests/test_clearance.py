@@ -219,6 +219,32 @@ def test_a_real_broker_writes_no_access_log(monkeypatch, tmp_path):
     assert access.disabled
 
 
+def test_from_env_accepts_the_previous_tokens_during_a_rotation(monkeypatch, tmp_path):
+    old_worker, old_admin = "old-worker-" + "w" * 32, "old-admin-" + "a" * 32
+    env(monkeypatch, tmp_path, "open")
+    monkeypatch.setenv("FLEET_WORKER_TOKEN_PREVIOUS", old_worker)
+    monkeypatch.setenv("FLEET_ADMIN_TOKEN_PREVIOUS", old_admin)
+    app = _from_env()
+    assert (
+        TestClient(app, headers={"Authorization": f"Bearer {old_admin}"})
+        .post("/jobs", json=JOB)
+        .status_code
+        == 201
+    )
+    w = TestClient(app, headers={"Authorization": f"Bearer {old_worker}"})
+    assert w.post("/lease", json=CAPS).status_code == 200
+
+
+def test_from_env_reads_the_rate_limit(monkeypatch, tmp_path):
+    env(monkeypatch, tmp_path, "open")
+    monkeypatch.setenv("FLEET_WORKER_BURST", "1")
+    w = TestClient(_from_env(), headers={"Authorization": f"Bearer {WORKER}"})
+    assert [w.post("/lease", json=CAPS).status_code for _ in range(2)] == [204, 429]
+    monkeypatch.setenv("FLEET_WORKER_RATE", "0")
+    with pytest.raises(ValueError, match="rate"):
+        _from_env()
+
+
 def test_from_env_reads_the_clearance_list(monkeypatch, tmp_path):
     env(monkeypatch, tmp_path, "derived, open")
     c = TestClient(_from_env(), headers={"Authorization": f"Bearer {ADMIN}"})

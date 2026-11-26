@@ -1,3 +1,4 @@
+import hashlib
 import sqlite3
 import threading
 
@@ -38,7 +39,36 @@ def test_claim_leases_oldest_job(tmp_path):
     assert claim.attempts == 1
     row = store.get("j0")
     assert row["state"] == "leased"
-    assert row["lease_token"] == claim.lease_token
+    assert row["lease_token"] == hashlib.sha256(claim.lease_token.encode()).hexdigest()
+
+
+def test_a_copy_of_the_database_cannot_take_over_a_lease(tmp_path):
+    # Only sha256(token) is stored (docs/security.md, before phase 4): someone who reads the
+    # table learns the hash, which the broker won't accept as a token.
+    store = store_with(tmp_path, 1)
+    claim = store.claim(NOW, 60, **ANY)
+    stolen = store.get("j0")["lease_token"]
+    assert claim.lease_token not in {stolen, None}
+    assert store.heartbeat("j0", stolen, NOW, 60) is None
+    assert store.complete("j0", stolen, "f" * 64, now=NOW) is None
+    assert store.heartbeat("j0", claim.lease_token, NOW, 60) == NOW + 60
+    assert store.complete("j0", claim.lease_token, "f" * 64, now=NOW).first
+
+
+def test_tokens_stored_before_hashing_are_hashed_on_startup(tmp_path):
+    # A database from before the change holds the token itself; the next start hashes it, so
+    # no token stays at rest and the running lease still works.
+    store = store_with(tmp_path, 1)
+    claim = store.claim(NOW, 60, **ANY)
+    store.db.execute("UPDATE jobs SET lease_token = ?", (claim.lease_token,))  # the old format
+    store.close()
+    reopened = JobStore(tmp_path / "broker.db")
+    assert (
+        reopened.get("j0")["lease_token"] == hashlib.sha256(claim.lease_token.encode()).hexdigest()
+    )
+    assert reopened.heartbeat("j0", claim.lease_token, NOW, 60) == NOW + 60
+    JobStore(tmp_path / "broker.db").close()  # again: nothing left to hash, nothing changes
+    assert reopened.heartbeat("j0", claim.lease_token, NOW, 60) == NOW + 60
 
 
 def test_claimed_job_is_not_claimed_again(tmp_path):

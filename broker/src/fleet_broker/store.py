@@ -7,6 +7,7 @@ Times are the broker's wall clock (time.time()), passed in as `now` so tests use
 numbers. Only the broker compares them; workers only ever see durations (ttl_seconds).
 """
 
+import hashlib
 import secrets
 import sqlite3
 from collections.abc import Collection
@@ -22,7 +23,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     state            TEXT NOT NULL DEFAULT 'queued'
                      CHECK (state IN ('queued', 'leased', 'done', 'dead')),
     attempts         INTEGER NOT NULL DEFAULT 0,  -- how many times the job was leased
-    lease_token      TEXT,                        -- set while leased
+    lease_token      TEXT,                        -- sha256 of the lease token, set while leased
     lease_expires_at REAL,                        -- broker wall clock, set while leased
     result_key       TEXT,                        -- set when done
     context_sha256   TEXT,                        -- NULL: no context (ADR 0012)
@@ -42,6 +43,15 @@ MIGRATIONS = [
     ("enqueued_at", "REAL"),  # ADR 0018: queue age and the enqueue-to-done SLO
     ("done_at", "REAL"),
 ]
+
+
+def _digest(lease_token: str) -> str:
+    """What the table stores instead of the token (docs/security.md, before phase 4), so a read
+    of the database can't take over a lease. Plain SHA-256 is enough: a token has 128 random
+    bits, so there's nothing to guess and no salt or slow hash is needed (those protect
+    passwords, which people choose). Rows from before this change are hashed on startup
+    (JobStore._migrate)."""
+    return hashlib.sha256(lease_token.encode()).hexdigest()
 
 
 def _marks(values: list[str]) -> str:
@@ -120,6 +130,18 @@ class JobStore:
             if name not in have:
                 # name and type come from the constant above, never from input
                 self.db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {sql_type}")
+        # Rows from before lease tokens were hashed hold the token itself (22 characters; a
+        # digest is 64). Hash them in place, so no token is stored anywhere and those leases keep
+        # working. Repeating this finds nothing: it's safe on every startup.
+        old = self.db.execute(
+            "SELECT job_id, lease_token FROM jobs WHERE lease_token IS NOT NULL"
+            " AND length(lease_token) != 64"
+        ).fetchall()
+        for row in old:
+            self.db.execute(
+                "UPDATE jobs SET lease_token = ? WHERE job_id = ? AND lease_token = ?",
+                (_digest(row["lease_token"]), row["job_id"], row["lease_token"]),
+            )
 
     def close(self) -> None:
         self.db.close()
@@ -183,13 +205,13 @@ class JobStore:
             f"   AND prompt_version IN ({_marks(capabilities)})"
             f"   AND model IN ({_marks(models)})"
             "   ORDER BY rowid LIMIT 1)"
-            " RETURNING job_id, input_sha256, model, prompt_version, lease_token,"
+            " RETURNING job_id, input_sha256, model, prompt_version,"
             "   lease_expires_at, attempts, context_sha256",
-            (token, now + ttl_seconds, now, *clearance, *capabilities, *models),
+            (_digest(token), now + ttl_seconds, now, *clearance, *capabilities, *models),
         ).fetchone()
         if row is None:
             return None
-        return Claim(**dict(row))
+        return Claim(**dict(row), lease_token=token)  # the only place the token itself goes
 
     def heartbeat(
         self, job_id: str, lease_token: str, now: float, ttl_seconds: float
@@ -204,7 +226,7 @@ class JobStore:
             "UPDATE jobs SET lease_expires_at = ?"
             " WHERE job_id = ? AND lease_token = ? AND state = 'leased'"
             " RETURNING lease_expires_at",
-            (now + ttl_seconds, job_id, lease_token),
+            (now + ttl_seconds, job_id, _digest(lease_token)),
         ).fetchone()
         return None if row is None else row["lease_expires_at"]
 
@@ -227,7 +249,7 @@ class JobStore:
             "UPDATE jobs SET state = 'done', result_key = ?, done_at = ?"
             " WHERE job_id = ? AND lease_token = ? AND state = 'leased'"
             f" RETURNING {facts}",
-            (result_key, now, job_id, lease_token),
+            (result_key, now, job_id, _digest(lease_token)),
         ).fetchone()
         if row is not None:
             return Completion(**dict(row), first=True)
@@ -235,7 +257,7 @@ class JobStore:
         row = self.db.execute(
             f"SELECT {facts} FROM jobs"
             " WHERE job_id = ? AND lease_token = ? AND state = 'done' AND result_key = ?",
-            (job_id, lease_token, result_key),
+            (job_id, _digest(lease_token), result_key),
         ).fetchone()
         return None if row is None else Completion(**dict(row), first=False)
 

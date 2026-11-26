@@ -33,13 +33,24 @@ Out of scope everywhere: an attacker on the maintainer's own PC (they would alre
       condition mutation-checked. Copyrighted footage must never be leased to a volunteer (ADR 0002).
 
 **Before phase 4 (public broker):**
-- [ ] Rate limits per token on `/lease` and `/heartbeat`, plus a Cloud Run max-instances cap (cost and thread
-      pool protection). Cloud Armor or an API gateway body limit as well, since chunked bodies skip the
-      Content-Length check.
-- [ ] Token rotation: accept two tokens during a rollover, and document the steps in docs/secrets.md.
+- [x] Rate limits on the worker endpoints (`/lease`, `/heartbeat`, `/complete`): a token bucket per role,
+      20/s with bursts of 100, after authentication so strangers can't use it up; 429 with Retry-After,
+      which workers retry like a 503; counted as `fleet.http.limited`. Built 2026-11-25 (ADR 0019 step 1).
+- [x] Body limit for chunked requests: counted as the body arrives (`bodylimit.py`), 413 past 16 KiB.
+      In the app rather than Cloud Armor, which needs a load balancer (about $18/month,
+      docs/research/phase-4.md). Q46, 2026-11-25.
+- [ ] A Cloud Run max-instances cap (phase 4 step 4): the bucket is per instance, so the cap bounds the
+      fleet-wide rate and the bill.
+- [x] Token rotation: each role accepts a `*_PREVIOUS` token during a rollover; steps in docs/secrets.md.
 - [ ] HTTPS only, through Cloud Run's managed TLS. No plain-HTTP listener is exposed.
 - [ ] Replace SQLite with a networked store (ADR 0005), then re-check its access control.
-- [ ] Store `sha256(lease_token)` instead of the token, so a read of the store can't take over leases.
+- [x] Store `sha256(lease_token)` instead of the token, so a read of the store can't take over leases.
+      Plain SHA-256: tokens are 128 random bits, so there's nothing to brute-force. Rows from before the
+      change are hashed in place on startup.
+- Accepted until phase 10: workers share one token, so one token holder (a buggy worker of the
+  maintainer's, or a leaked token) can use up the shared poll bucket and slow the others. Heartbeats have
+  their own bucket, so a `/lease` hot loop can't cost running jobs their leases; results are
+  content-addressed, so the worst case is churn, not loss. Per-worker tokens and buckets fix it (below).
 - [ ] Run the security-reviewer again on the deployment (Terraform, IAM, Cloud Run settings).
 
 **Before phase 10 (volunteers):**

@@ -28,6 +28,9 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import jsonlog, telemetry
+from .auth import bearer_matches
+from .bodylimit import BodyLimit
+from .ratelimit import TokenBucket, retry_after
 from .store import JobStore
 from .telemetry import Metrics
 
@@ -92,17 +95,42 @@ class Completion(LeaseRef):
     result_key: Sha256Hex
 
 
-def _bearer_checker(token: str, role: str) -> Callable[..., None]:
-    expected = f"Bearer {token}".encode()
-
+def _bearer_checker(
+    tokens: Collection[str],
+    role: str,
+    bucket: TokenBucket | None = None,
+    on_limited: Callable[[], None] = lambda: None,
+) -> Callable[..., None]:
     def check(authorization: Annotated[str, Header()] = "") -> None:
-        # Compare bytes: compare_digest raises TypeError on non-ASCII str, which would turn a
-        # junk header into a 500. Constant time, so timings don't reveal the token.
-        # Starlette decodes headers as latin-1, so encoding back with latin-1 is lossless.
-        if not hmac.compare_digest(authorization.encode("latin-1"), expected):
+        if not bearer_matches(authorization, tokens):
             raise HTTPException(status_code=401, detail=f"bad or missing {role} token")
+        # After authentication, so strangers can't use up the workers' allowance.
+        wait = bucket.take() if bucket else 0.0
+        if wait:
+            on_limited()
+            raise HTTPException(
+                status_code=429, detail="rate limited", headers={"Retry-After": retry_after(wait)}
+            )
 
     return check
+
+
+def _token_sets(
+    worker_token: str, admin_token: str, previous_worker: str, previous_admin: str
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The tokens each role accepts: the current one, plus the previous one during a rotation
+    (docs/secrets.md). Every token gets the same checks, and no token may serve both roles."""
+    workers = tuple(t for t in (worker_token, previous_worker) if t)
+    admins = tuple(t for t in (admin_token, previous_admin) if t)
+    for role, tokens in (("worker", workers), ("admin", admins)):
+        for token in tokens:
+            if not token.isascii():  # headers arrive latin-1 decoded: keep tokens plain ASCII
+                raise ValueError(f"{role} token must be ASCII")
+            if len(token) < MIN_TOKEN_LENGTH:
+                raise ValueError(f"{role} token must be at least {MIN_TOKEN_LENGTH} characters")
+    if any(hmac.compare_digest(w.encode(), a.encode()) for w in workers for a in admins):
+        raise ValueError("worker and admin tokens must differ")
+    return workers, admins
 
 
 def create_app(
@@ -117,15 +145,19 @@ def create_app(
     busy_timeout: float = 5.0,
     metrics: Metrics | None = None,
     tracing: Callable[[FastAPI], Callable[[], None]] | None = None,
+    previous_worker_token: str = "",
+    previous_admin_token: str = "",
+    worker_rate: float = 20.0,
+    worker_burst: int = 100,
 ) -> FastAPI:
-    """`tracing` instruments the finished app and returns its flush (telemetry.trace_app)."""
-    for name, token in (("worker", worker_token), ("admin", admin_token)):
-        if not token.isascii():  # headers arrive latin-1 decoded: keep tokens plain ASCII
-            raise ValueError(f"{name} token must be ASCII")
-        if len(token) < MIN_TOKEN_LENGTH:
-            raise ValueError(f"{name} token must be at least {MIN_TOKEN_LENGTH} characters")
-    if hmac.compare_digest(worker_token.encode(), admin_token.encode()):
-        raise ValueError("worker and admin tokens must differ")
+    """`tracing` instruments the finished app and returns its flush (telemetry.trace_app).
+    `previous_*_token`: also accepted while a rotation is under way (docs/secrets.md).
+    `worker_rate`/`worker_burst`: the worker endpoints' token bucket (ratelimit.py). 20/s is
+    far above a GPU fleet's need (a few requests per job, jobs take seconds) and far below a
+    hot loop's."""
+    worker_tokens, admin_tokens = _token_sets(
+        worker_token, admin_token, previous_worker_token, previous_admin_token
+    )
     clearance = frozenset(clearance)
     metrics = metrics or Metrics()
     if not clearance or not clearance <= DATA_CLASSES:
@@ -169,10 +201,13 @@ def create_app(
             return Response(status_code=503, headers={"Retry-After": "1"})
         raise exc
 
+    # Bodies without a Content-Length (chunked) are counted as they arrive (bodylimit.py).
+    app.add_middleware(BodyLimit, limit=MAX_BODY_BYTES)
+
     @app.middleware("http")
     async def limit_body(request: Request, call_next):
-        # Rejects declared oversize bodies before they're read. Field limits below catch the
-        # rest; the public deployment adds a gateway limit too (docs/security.md).
+        # Rejects declared oversize bodies before they're read; BodyLimit catches undeclared
+        # (chunked) ones while reading, and the field limits below catch the rest.
         length = request.headers.get("content-length")
         if length is not None and (
             # isascii: str.isdigit() also accepts "²", which int() can't parse
@@ -191,8 +226,13 @@ def create_app(
             s.close()
 
     Store = Annotated[JobStore, Depends(store)]
-    worker = [Depends(_bearer_checker(worker_token, "worker"))]
-    admin = [Depends(_bearer_checker(admin_token, "admin"))]
+    # Two buckets: heartbeats get their own, so a worker hot-looping on /lease (a bug, or a leaked
+    # token) can't make the other workers' heartbeats fail and cost them their running jobs.
+    polls = TokenBucket(worker_rate, worker_burst, clock)
+    beats = TokenBucket(worker_rate, worker_burst, clock)
+    worker = [Depends(_bearer_checker(worker_tokens, "worker", polls, metrics.limited))]
+    heartbeater = [Depends(_bearer_checker(worker_tokens, "worker", beats, metrics.limited))]
+    admin = [Depends(_bearer_checker(admin_tokens, "admin"))]
 
     @app.get("/healthz", status_code=204)
     def healthz() -> Response:
@@ -229,7 +269,7 @@ def create_app(
             attempts=claim.attempts,
         )
 
-    @app.post("/heartbeat", dependencies=worker)
+    @app.post("/heartbeat", dependencies=heartbeater)
     def heartbeat(ref: LeaseRef, s: Store) -> HeartbeatOut:
         if s.heartbeat(ref.job_id, ref.lease_token, clock(), ttl_seconds) is None:
             raise HTTPException(status_code=409, detail="lease lost")
@@ -266,9 +306,13 @@ def _from_env() -> FastAPI | None:
     db = Path(os.environ.get("FLEET_DB", "data/broker.db"))
     db.parent.mkdir(parents=True, exist_ok=True)
     flush_logs = telemetry.export_logs()  # a no-op without the [otel] extra and an endpoint
+    # Set only while a rotation is under way (docs/secrets.md "Rotating broker tokens").
+    previous_worker = os.environ.get("FLEET_WORKER_TOKEN_PREVIOUS", "")
+    previous_admin = os.environ.get("FLEET_ADMIN_TOKEN_PREVIOUS", "")
+    worker_tokens = tuple(t for t in (worker_token, previous_worker) if t)
 
     def tracing(a: FastAPI) -> Callable[[], None]:
-        stop_traces = telemetry.trace_app(a, worker_token=worker_token)
+        stop_traces = telemetry.trace_app(a, worker_tokens=worker_tokens)
 
         def stop() -> None:  # on shutdown: the last spans, then the last log records
             stop_traces()
@@ -284,6 +328,11 @@ def _from_env() -> FastAPI | None:
         docs=os.environ.get("FLEET_DOCS") == "1",
         metrics=telemetry.setup(db, time.time),
         tracing=tracing,
+        previous_worker_token=previous_worker,
+        previous_admin_token=previous_admin,
+        # Optional overrides of the worker rate limit; TokenBucket refuses non-positive values.
+        worker_rate=float(os.environ.get("FLEET_WORKER_RATE", "20")),
+        worker_burst=int(os.environ.get("FLEET_WORKER_BURST", "100")),
     )
 
 

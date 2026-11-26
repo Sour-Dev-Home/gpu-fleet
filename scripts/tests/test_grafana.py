@@ -20,6 +20,7 @@ PROMETHEUS_NAMES = {
     "fleet.leases.reissued": {"fleet_leases_reissued_total"},
     "fleet.jobs.completed": {"fleet_jobs_completed_total"},
     "fleet.http.busy": {"fleet_http_busy_total"},
+    "fleet.http.limited": {"fleet_http_limited_total"},
     "fleet.job.turnaround": {
         "fleet_job_turnaround_seconds_bucket",
         "fleet_job_turnaround_seconds_count",

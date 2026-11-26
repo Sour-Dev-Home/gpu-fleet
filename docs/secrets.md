@@ -39,7 +39,24 @@ Syncthing-backed folder plus a USB copy (you own the backups).
   }
   ./scripts/with-secrets.ps1 -Names FLEET_WORKER_TOKEN,FLEET_ADMIN_TOKEN -- uv run --directory broker --with uvicorn uvicorn fleet_broker.app:app
   ```
-  Workers get only the worker token. To rotate, generate a new one the same way and restart the broker and workers.
+  Workers get only the worker token.
+
+### Rotating broker tokens (no downtime)
+The broker accepts a second, previous token per role while a rotation is under way, so workers switch one at a
+time. The same steps work for `FLEET_ADMIN_TOKEN` (with `FLEET_ADMIN_TOKEN_PREVIOUS`).
+1. Move the current value aside, then generate the new one straight into the vault:
+   ```powershell
+   Set-Secret -Vault fleet -Name FLEET_WORKER_TOKEN_PREVIOUS -Secret (Get-Secret -Vault fleet FLEET_WORKER_TOKEN)
+   Set-Secret -Vault fleet -Name FLEET_WORKER_TOKEN -Secret ([Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)))
+   ```
+2. Restart the broker with both: `-Names FLEET_WORKER_TOKEN,FLEET_WORKER_TOKEN_PREVIOUS,FLEET_ADMIN_TOKEN`.
+   It now accepts either worker token.
+3. Restart each worker; they read the new `FLEET_WORKER_TOKEN`.
+4. When no worker uses the old one, remove it and restart the broker without it:
+   `Remove-Secret -Vault fleet -Name FLEET_WORKER_TOKEN_PREVIOUS`.
+
+For a **leaked** token, skip the overlap: replace it and restart everything at once, so the leaked value stops
+working immediately. On Cloud Run (phase 4) the tokens live in Secret Manager, and step 2 is a new revision.
 
 ## sops + age (step 3)
 - Your age private key: `%APPDATA%\sops\age\keys.txt` (only your user can read it). **Back it up** in a password
