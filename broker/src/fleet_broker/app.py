@@ -33,6 +33,7 @@ from . import jsonlog, s3, telemetry
 from .auth import bearer_matches
 from .bodylimit import BodyLimit
 from .claimability import Claimability
+from .oidc import OidcVerifier
 from .ratelimit import TokenBucket, retry_after
 from .s3 import ResultBucket
 from .store import (
@@ -48,6 +49,9 @@ from .telemetry import Metrics
 log = logging.getLogger("fleet_broker")
 
 MIN_TOKEN_LENGTH = 32  # e.g. secrets.token_urlsafe(32) gives 43 characters
+FLUSH_TIMEOUT_MS = (
+    10_000  # POST /telemetry/flush: all providers together; Cloud Run's limit is 30 s
+)
 MAX_BODY_BYTES = 16 * 1024  # every request here is a few hundred bytes of JSON
 
 Sha256Hex = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
@@ -147,6 +151,23 @@ def _bearer_checker(
     return check
 
 
+def _flush_checker(
+    admin_tokens: Collection[str], verify: Callable[[str], bool] | None
+) -> Callable[..., None]:
+    """POST /telemetry/flush: the admin bearer token, OR a Google-signed ID token that `verify`
+    accepts (Cloud Scheduler's, ADR 0027). Nothing from the header is ever logged or echoed."""
+
+    def check(authorization: Annotated[str, Header()] = "") -> None:
+        if bearer_matches(authorization, admin_tokens):
+            return
+        scheme, _, token = authorization.partition(" ")
+        if verify is not None and scheme == "Bearer" and token and verify(token):
+            return
+        raise HTTPException(status_code=401, detail="bad or missing admin or scheduler token")
+
+    return check
+
+
 def _token_sets(
     worker_token: str, admin_token: str, previous_worker: str, previous_admin: str
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -184,6 +205,7 @@ def create_app(
     bucket: ResultBucket | None = None,
     max_result_bytes: int = s3.DEFAULT_MAX_RESULT_BYTES,
     claimability: Claimability | None = None,
+    flush_oidc: Callable[[str], bool] | None = None,
 ) -> FastAPI:
     """`database`: the PostgreSQL URL, or an open pool made by store.make_pool. The app owns the
     pool either way: its lifespan closes it, so shutdown (SIGTERM) releases the connections.
@@ -197,7 +219,9 @@ def create_app(
     exists, and /complete checks the stored object. None is local mode, exactly as before.
     `max_result_bytes`: the largest result /upload-url will sign for.
     `claimability`: remembers what lease requests declared, for fleet.jobs.unclaimable; pass the
-    same object to telemetry.setup so the gauge reads what /lease records (ADR 0026)."""
+    same object to telemetry.setup so the gauge reads what /lease records (ADR 0026).
+    `flush_oidc`: accepts a Google ID token (oidc.OidcVerifier) on POST /telemetry/flush as well as
+    the admin token; None means the admin token only (ADR 0027)."""
     worker_tokens, admin_tokens = _token_sets(
         worker_token, admin_token, previous_worker_token, previous_admin_token
     )
@@ -302,6 +326,32 @@ def create_app(
     worker = [Depends(_bearer_checker(worker_tokens, "worker", polls, metrics.limited))]
     heartbeater = [Depends(_bearer_checker(worker_tokens, "worker", beats, metrics.limited))]
     admin = [Depends(_bearer_checker(admin_tokens, "admin"))]
+    flusher = [Depends(_flush_checker(admin_tokens, flush_oidc))]
+
+    @app.post("/telemetry/flush", status_code=204, dependencies=flusher, response_model=None)
+    def telemetry_flush():
+        """Export the metrics, spans and log records now (ADR 0027). Cloud Run (request-based billing)
+        gives the SDK's background threads no CPU between requests, so Cloud Scheduler calls this
+        every minute. One shared deadline: each provider gets what is left of FLUSH_TIMEOUT_MS."""
+        deadline = time.monotonic() + FLUSH_TIMEOUT_MS / 1000
+
+        def left() -> int:
+            return max(1, int((deadline - time.monotonic()) * 1000))
+
+        ok = metrics.flush(left())  # collects the gauges once, then exports
+        tracer = getattr(app.state, "tracer_provider", None)
+        if tracer is not None:
+            ok = bool(tracer.force_flush(left())) and ok
+        for handler in list(logging.getLogger().handlers):
+            force_flush = getattr(handler, "force_flush", None)  # the OTLP log handler (jsonlog)
+            if force_flush is not None:
+                ok = bool(force_flush(left())) and ok
+        if not ok:
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "telemetry export incomplete", "code": "flush_incomplete"},
+            )
+        return Response(status_code=204)
 
     @app.get("/healthz", status_code=204)
     def healthz() -> Response:
@@ -528,6 +578,14 @@ def _from_env() -> FastAPI | None:
     # S3 mode (ADR 0025) is all-or-nothing; a half-set deployment stops here, before any pool.
     bucket = s3.bucket_from_env(os.environ)
     max_result_bytes = s3.max_result_bytes_from_env(os.environ)
+    # Grafana Cloud auth (ADR 0027): built here, before any exporter exists, and never logged. A
+    # half-set pair, or a half-set scheduler identity, stops the broker before the pool opens.
+    telemetry.apply_grafana_auth(os.environ)
+    flush_oidc = None
+    oidc_audience = os.environ.get("FLEET_FLUSH_OIDC_AUDIENCE", "").strip()
+    oidc_email = os.environ.get("FLEET_FLUSH_OIDC_EMAIL", "").strip()
+    if oidc_audience or oidc_email:
+        flush_oidc = OidcVerifier(oidc_audience, oidc_email)  # raises unless both are set
     pool = make_pool(database_url)
     flush_logs = telemetry.export_logs()  # a no-op without the [otel] extra and an endpoint
     # Set only while a rotation is under way (docs/secrets.md "Rotating broker tokens").
@@ -558,6 +616,7 @@ def _from_env() -> FastAPI | None:
                 JobStore(pool, migrate=False), time.time, claimability=claimability
             ),
             claimability=claimability,
+            flush_oidc=flush_oidc,
             tracing=tracing,
             previous_worker_token=previous_worker,
             previous_admin_token=previous_admin,

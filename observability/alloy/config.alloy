@@ -1,0 +1,62 @@
+// The PC's host metrics to Grafana Cloud (ADR 0027, Q91). Run by Grafana Alloy as a Windows service;
+// scripts/setup-alloy.ps1 points the service at this file and sets the environment variables below.
+//
+//   prometheus.exporter.windows -> prometheus.scrape -> otelcol.receiver.prometheus
+//     -> otelcol.processor.resource (service.instance.id) -> otelcol.exporter.otlphttp (basic auth)
+//
+// Nothing secret or account-specific is written here:
+//   FLEET_GRAFANA_OTLP_URL      the OTLP gateway base URL (vault: FLEET_GRAFANA_OTLP_URL)
+//   FLEET_GRAFANA_INSTANCE_ID   basic-auth user name (vault: FLEET_GRAFANA_INSTANCE_ID)
+//   FLEET_GRAFANA_TOKEN_FILE    path of the file holding the write-only token (ACL: SYSTEM + Administrators)
+//   FLEET_INSTALL_ID            the worker's install ID, so PC metrics and worker metrics share service.instance.id
+
+local.file "grafana_token" {
+  filename  = sys.env("FLEET_GRAFANA_TOKEN_FILE")
+  is_secret = true
+}
+
+prometheus.exporter.windows "pc" {
+  enabled_collectors = ["cpu", "memory", "logical_disk", "net", "gpu"]
+}
+
+prometheus.scrape "pc" {
+  targets         = prometheus.exporter.windows.pc.targets
+  forward_to      = [otelcol.receiver.prometheus.pc.receiver]
+  scrape_interval = "60s"
+}
+
+otelcol.receiver.prometheus "pc" {
+  output {
+    metrics = [otelcol.processor.resource.pc.input]
+  }
+}
+
+otelcol.processor.resource "pc" {
+  attributes {
+    key    = "service.instance.id"
+    value  = sys.env("FLEET_INSTALL_ID")
+    action = "upsert"
+  }
+
+  attributes {
+    key    = "service.name"
+    value  = "fleet-pc"
+    action = "upsert"
+  }
+
+  output {
+    metrics = [otelcol.exporter.otlphttp.grafana.input]
+  }
+}
+
+otelcol.auth.basic "grafana" {
+  username = sys.env("FLEET_GRAFANA_INSTANCE_ID")
+  password = local.file.grafana_token.content
+}
+
+otelcol.exporter.otlphttp "grafana" {
+  client {
+    endpoint = sys.env("FLEET_GRAFANA_OTLP_URL")
+    auth     = otelcol.auth.basic.grafana.handler
+  }
+}

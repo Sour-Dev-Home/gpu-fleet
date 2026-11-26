@@ -1,0 +1,123 @@
+# Telemetry to Grafana Cloud Free over OTLP/HTTP (ADR 0027, Q88-Q92), and the once-a-minute flush that makes it
+# work on Cloud Run with request-based billing.
+#
+# - The broker's write-only Grafana token lives in Secret Manager as a CONTAINER here; the maintainer adds the
+#   version from the vault (README), so no secret enters Terraform state.
+# - The OTLP endpoint and the stack's instance ID come from TF_VAR_ variables (the vault), like project_id, and
+#   are only passed to the broker when var.grafana_export is true: the stack plans and applies without them.
+# - Cloud Run gives CPU only while a request runs, so the SDK's background exporter starves between requests.
+#   Cloud Scheduler calls POST /telemetry/flush every minute with an OIDC token of its own service account (no
+#   admin token anywhere in Scheduler); the broker verifies it (oidc.py) and force-flushes.
+#
+# KILL SWITCH (killswitch.tf, ADR 0024): the switch removes only `allUsers` from the broker's invoker role. The
+# scheduler account keeps its OWN run.invoker member (scheduler_invokes below), so flushes, and with them the
+# telemetry that explains an incident, keep working while the public is locked out. Both are additive member
+# resources: no authoritative binding or policy exists in this stack, so neither apply nor the switch removes
+# the other's member. The broker still checks the ID token itself (audience, email, email_verified).
+
+locals {
+  # Cloud Run's deterministic URL for the broker: https://<service>-<project number>.<region>.run.app. Built
+  # from names so the broker's env does not reference its own service (a cycle). The check below compares it
+  # with the real URL after the apply.
+  broker_url = "https://fleet-broker-${data.google_project.this.number}.${var.region}.run.app"
+
+  # The job needs a broker to call and the export switched on.
+  flush_enabled = var.grafana_export && var.broker_image != null
+
+  # Names are listed apart from the values: the values can be sensitive, and for_each can't iterate a
+  # sensitive collection. Empty when the export is off, so the broker's env is exactly as before.
+  grafana_env_names = var.grafana_export ? toset([
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "FLEET_GRAFANA_INSTANCE_ID",
+    "FLEET_FLUSH_OIDC_AUDIENCE",
+    "FLEET_FLUSH_OIDC_EMAIL",
+  ]) : toset([])
+
+  grafana_env = {
+    OTEL_EXPORTER_OTLP_ENDPOINT = var.grafana_otlp_endpoint
+    FLEET_GRAFANA_INSTANCE_ID   = var.grafana_instance_id
+    FLEET_FLUSH_OIDC_AUDIENCE   = local.broker_url
+    FLEET_FLUSH_OIDC_EMAIL      = google_service_account.scheduler.email
+  }
+}
+
+# --- the broker's Grafana token ------------------------------------------------------------------------------
+
+# Container only. Add the version from the vault (README, "Grafana Cloud export").
+resource "google_secret_manager_secret" "grafana_token_broker" {
+  secret_id = "fleet-grafana-token-broker"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [google_project_service.api]
+}
+
+# On this secret only: the broker's other secrets keep their own bindings (main.tf).
+resource "google_secret_manager_secret_iam_member" "broker_reads_grafana" {
+  secret_id = google_secret_manager_secret.grafana_token_broker.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.broker.email}"
+}
+
+# --- the flush schedule --------------------------------------------------------------------------------------
+
+resource "google_service_account" "scheduler" {
+  account_id   = "fleet-scheduler"
+  display_name = "Fleet Cloud Scheduler (flushes the broker's telemetry)"
+
+  depends_on = [google_project_service.api]
+}
+
+# Per service, not per project, and kept while allUsers is removed (see the KILL SWITCH note on top).
+resource "google_cloud_run_v2_service_iam_member" "scheduler_invokes" {
+  count = local.flush_enabled ? 1 : 0
+
+  name     = google_cloud_run_v2_service.broker[0].name
+  location = google_cloud_run_v2_service.broker[0].location
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.scheduler.email}"
+}
+
+# 43,200 calls a month (one a minute) against Cloud Run's 2M free requests; Scheduler's first 3 jobs are free.
+resource "google_cloud_scheduler_job" "telemetry_flush" {
+  count = local.flush_enabled ? 1 : 0
+
+  name             = "fleet-telemetry-flush"
+  description      = "Force the broker to export its telemetry (ADR 0027)"
+  region           = var.region
+  schedule         = "* * * * *"
+  time_zone        = "Etc/UTC"
+  attempt_deadline = "30s"
+
+  # A missed minute is covered by the next one, and a retry would stack a second flush on the first.
+  retry_config {
+    retry_count = 0
+  }
+
+  http_target {
+    http_method = "POST"
+    uri         = "${google_cloud_run_v2_service.broker[0].uri}/telemetry/flush"
+
+    # No body and no Authorization header of our own: Scheduler adds the Google-signed ID token.
+    oidc_token {
+      service_account_email = google_service_account.scheduler.email
+      audience              = local.broker_url
+    }
+  }
+
+  depends_on = [
+    google_project_service.api,
+    google_cloud_run_v2_service_iam_member.scheduler_invokes,
+  ]
+}
+
+# The token's audience is local.broker_url; the broker checks it against the same value. If Google ever changes
+# the URL scheme, every flush would be refused: this warns after an apply.
+check "broker_url_matches_the_service" {
+  assert {
+    condition     = var.broker_image == null || google_cloud_run_v2_service.broker[0].uri == local.broker_url
+    error_message = "The broker's run.app URL is not the predicted one: the flush token's audience will not match. Set local.broker_url from the real URL."
+  }
+}

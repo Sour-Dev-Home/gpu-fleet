@@ -85,7 +85,10 @@ def otel_handler(service_name: str, base_url: str | None = None, exporter=None):
         )
     else:
         provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
-    return Allowlisted(logger_provider=provider), provider.shutdown
+    handler = Allowlisted(logger_provider=provider)
+    # POST /telemetry/flush (ADR 0027) calls this on every root handler that has one.
+    handler.force_flush = provider.force_flush
+    return handler, provider.shutdown
 
 
 def setup(level: int = logging.INFO, stream=None) -> None:

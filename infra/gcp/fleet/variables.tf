@@ -120,6 +120,42 @@ variable "aws_federation_audience" {
   default     = "fleet-aws-federation"
 }
 
+variable "grafana_export" {
+  description = <<-EOT
+    Send the broker's metrics, logs and traces to Grafana Cloud over OTLP and schedule the once-a-minute flush
+    (ADR 0027). False by default so the stack plans without the two values below. Before turning it on, add a
+    version to the secret fleet-grafana-token-broker (README, Grafana Cloud export).
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "grafana_otlp_endpoint" {
+  description = "Grafana Cloud's OTLP base URL (https://.../otlp; the SDK appends /v1/metrics etc.). Identifies the account: from TF_VAR_grafana_otlp_endpoint in the vault, never committed, hidden in plan output."
+  type        = string
+  default     = null
+  nullable    = true
+  sensitive   = true
+
+  validation {
+    condition     = var.grafana_otlp_endpoint == null ? true : startswith(var.grafana_otlp_endpoint, "https://")
+    error_message = "grafana_otlp_endpoint must be an https:// URL (the token would travel in cleartext otherwise)."
+  }
+}
+
+variable "grafana_instance_id" {
+  description = "The Grafana Cloud stack's OTLP instance ID: the basic-auth user name. From TF_VAR_grafana_instance_id in the vault, never committed, hidden in plan output."
+  type        = string
+  default     = null
+  nullable    = true
+  sensitive   = true
+
+  validation {
+    condition     = var.grafana_instance_id == null ? true : can(regex("^[0-9]+$", var.grafana_instance_id))
+    error_message = "grafana_instance_id must be the numeric instance ID."
+  }
+}
+
 variable "rotation_in_progress" {
   description = <<-EOT
     True only while rotating the broker's tokens: passes the two "-previous" secrets (which always exist, empty)

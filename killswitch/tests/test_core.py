@@ -86,6 +86,15 @@ def test_at_the_budget_public_access_is_removed_and_other_members_kept():
     assert len(iam.sets) == 1
 
 
+def test_the_telemetry_schedulers_invoker_binding_survives_the_switch():
+    # ADR 0027: fleet-scheduler keeps run.invoker so telemetry flushes work while the broker is closed to
+    # the public. The switch edits the policy read-modify-write, removing only allUsers.
+    scheduler = "serviceAccount:fleet-scheduler@example-project.iam.gserviceaccount.com"
+    iam = FakeIam({INVOKER: [PUBLIC, scheduler]})
+    assert handle_push(push({"costAmount": 21, "budgetAmount": 20}), iam, SERVICE) == 200
+    assert iam.members(INVOKER) == [scheduler]
+
+
 def test_above_the_budget_removes_it_too_and_an_emptied_binding_goes():
     iam = FakeIam({INVOKER: [PUBLIC]})
     assert handle_push(push({"costAmount": 25.5, "budgetAmount": 20}), iam, SERVICE) == 200
