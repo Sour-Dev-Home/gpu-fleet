@@ -8,7 +8,7 @@ so a duplicate run is a harmless overwrite, and a finished result is never recom
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 def result_key(
@@ -48,6 +48,14 @@ class Job:
         return result_key(self.input_sha256, self.model, self.prompt_version, self.context_sha256)
 
 
+@dataclass(frozen=True)
+class UploadTarget:
+    """Where and how to PUT a result: the broker's /upload-url answer (ADR 0025)."""
+
+    url: str = field(repr=False)  # a bearer credential for one object for 5 minutes
+    headers: dict[str, str]  # exactly the signed ones: send them unchanged
+
+
 # Renew when 1/3 of the original TTL remains: room for a slow network or a busy GPU.
 RENEW_AFTER_FRACTION = 2 / 3
 
@@ -66,6 +74,10 @@ class Lease:
     ttl_seconds: float
     # time.monotonic() on this worker when the lease was granted or renewed
     received_at: float
+    # Presigned GET URLs for the input and the context, only from a broker with an S3 bucket
+    # (ADR 0025). Short-lived and for this job's objects alone; never logged.
+    input_url: str | None = field(default=None, repr=False)
+    context_url: str | None = field(default=None, repr=False)
 
     @property
     def expires_at(self) -> float:

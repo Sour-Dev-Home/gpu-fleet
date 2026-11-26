@@ -29,11 +29,19 @@ from fastapi.responses import JSONResponse
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import jsonlog, telemetry
+from . import jsonlog, s3, telemetry
 from .auth import bearer_matches
 from .bodylimit import BodyLimit
 from .ratelimit import TokenBucket, retry_after
-from .store import POOL_TIMEOUT, JobStore, ResultKeyMismatch, is_unavailable, make_pool
+from .s3 import ResultBucket
+from .store import (
+    POOL_TIMEOUT,
+    JobStore,
+    ResultKeyMismatch,
+    is_unavailable,
+    make_pool,
+    result_key_for,
+)
 from .telemetry import Metrics
 
 log = logging.getLogger("fleet_broker")
@@ -84,9 +92,29 @@ class LeaseOut(BaseModel):
     attempts: int
 
 
+class S3LeaseOut(LeaseOut):
+    """The lease in S3 mode (ADR 0025): the same fields plus presigned download URLs. A separate
+    model, so a local-mode lease has exactly the old fields and no nulls for the new ones."""
+
+    input_url: str
+    context_url: str | None = None
+
+
 class LeaseRef(Strict):
     job_id: Name
     lease_token: Token
+
+
+class UploadIn(LeaseRef):
+    result_key: Sha256Hex  # only checked against the job's own key, never used to build a URL
+    sha256: Sha256Hex  # of the result bytes (hex); S3 refuses a PUT whose bytes hash differently
+    size: Annotated[int, Field(ge=1, le=2**53)]  # over the cap is a clean 413, not a schema 422
+
+
+class UploadOut(BaseModel):
+    url: str
+    headers: dict[str, str]
+    expires_in: int
 
 
 class HeartbeatOut(BaseModel):
@@ -151,6 +179,8 @@ def create_app(
     previous_admin_token: str = "",
     worker_rate: float = 20.0,
     worker_burst: int = 100,
+    bucket: ResultBucket | None = None,
+    max_result_bytes: int = s3.DEFAULT_MAX_RESULT_BYTES,
 ) -> FastAPI:
     """`database`: the PostgreSQL URL, or an open pool made by store.make_pool. The app owns the
     pool either way: its lifespan closes it, so shutdown (SIGTERM) releases the connections.
@@ -159,7 +189,10 @@ def create_app(
     `previous_*_token`: also accepted while a rotation is under way (docs/secrets.md).
     `worker_rate`/`worker_burst`: the worker endpoints' token bucket (ratelimit.py). 20/s is
     far above a GPU fleet's need (a few requests per job, jobs take seconds) and far below a
-    hot loop's."""
+    hot loop's.
+    `bucket`: the results bucket (S3 mode, ADR 0025): leases carry presigned URLs, /upload-url
+    exists, and /complete checks the stored object. None is local mode, exactly as before.
+    `max_result_bytes`: the largest result /upload-url will sign for."""
     worker_tokens, admin_tokens = _token_sets(
         worker_token, admin_token, previous_worker_token, previous_admin_token
     )
@@ -223,6 +256,19 @@ def create_app(
         metrics.busy()
         return Response(status_code=503, headers={"Retry-After": "1"})
 
+    @app.exception_handler(s3.BucketUnavailable)
+    async def bucket_unavailable(request: Request, exc: s3.BucketUnavailable) -> Response:
+        # No credentials, no presign, or S3 would not answer (a 403 from HEAD included: loud, not
+        # "missing"): transient from the worker's side, so it retries (like a 503 from the
+        # database). The exception's type or S3 code only; nothing from the request.
+        log.warning("results bucket unavailable on %s: %s", request.url.path, exc)
+        metrics.busy()
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "storage unavailable", "code": "storage_unavailable"},
+            headers={"Retry-After": "1"},
+        )
+
     # Bodies without a Content-Length (chunked) are counted as they arrive (bodylimit.py).
     app.add_middleware(BodyLimit, limit=MAX_BODY_BYTES)
 
@@ -269,22 +315,89 @@ def create_app(
             now=clock(),
         )
 
-    @app.post("/lease", response_model=LeaseOut, dependencies=worker)
+    # response_model=None: one declared model would cut the S3 lease's extra fields; both are
+    # built as models (validated) and sent as their dicts.
+    @app.post("/lease", response_model=None, dependencies=worker)
     def lease(want: LeaseIn, s: Store):
+        if bucket is not None:
+            # Before the claim, which counts an attempt: an STS or metadata outage must not
+            # walk every job toward the dead-letter limit.
+            bucket.check()
         claim = s.claim(clock(), ttl_seconds, clearance, want.capabilities, want.models)
         if claim is None:
             return Response(status_code=204)
         metrics.leased(claim)
-        return LeaseOut(
-            job_id=claim.job_id,
-            input_sha256=claim.input_sha256,
-            model=claim.model,
-            prompt_version=claim.prompt_version,
-            context_sha256=claim.context_sha256,
-            lease_token=claim.lease_token,
-            ttl_seconds=ttl_seconds,
-            attempts=claim.attempts,
+        fields = {
+            "job_id": claim.job_id,
+            "input_sha256": claim.input_sha256,
+            "model": claim.model,
+            "prompt_version": claim.prompt_version,
+            "context_sha256": claim.context_sha256,
+            "lease_token": claim.lease_token,
+            "ttl_seconds": ttl_seconds,
+            "attempts": claim.attempts,
+        }
+        if bucket is None:
+            return JSONResponse(LeaseOut(**fields).model_dump())
+        # Signed locally, for this job's own objects only. The claim's clearance filter already
+        # decided that this worker may hold the lease; the key's class is the job's own (Q82).
+        if not _signable(claim.data_class):
+            return _not_signable(claim.job_id)
+        out = S3LeaseOut(
+            **fields,
+            input_url=bucket.get_url(s3.input_key(claim.data_class, claim.input_sha256)),
+            context_url=(
+                bucket.get_url(s3.input_key(claim.data_class, claim.context_sha256))
+                if claim.context_sha256 is not None
+                else None
+            ),
         )
+        return JSONResponse(out.model_dump(exclude_none=False))
+
+    @app.post("/upload-url", dependencies=worker)
+    def upload_url(up: UploadIn, s: Store):
+        if bucket is None:
+            # 404, not 409: 409 means "lease lost" to a worker (ADR 0007) and it would move on to
+            # the next job; this broker simply has no such endpoint, which is a configuration fact.
+            return JSONResponse(
+                status_code=404,
+                content={"detail": "this broker issues no presigned URLs", "code": s3.DISABLED},
+            )
+        if up.size > max_result_bytes:
+            return JSONResponse(
+                status_code=413,
+                content={"detail": "result too large", "code": "result_too_large"},
+            )
+        bucket.check()  # credentials first: an outage is a 503 here, before anything is written
+        try:
+            held = s.holder_key(up.job_id, up.lease_token, up.result_key)
+        except ResultKeyMismatch:
+            return _refuse(
+                "result_key_mismatch", "result_key is not this job's content address", up
+            )
+        if held is None:
+            raise HTTPException(status_code=409, detail="lease lost")
+        key, data_class = held
+        if not _signable(data_class):
+            return _not_signable(up.job_id)
+        # The key is the one the broker recomputed from the job's row, not the caller's string.
+        object_key = s3.result_object_key(data_class, key)
+        # A result is already stored (an earlier attempt of this job, or a rerun after a crash):
+        # the first valid one wins. Results are content-addressed by input, model and prompt, so
+        # any valid output for them is acceptable (ADR 0007). Declare IT, so /complete passes, and
+        # sign nothing: a PUT would be refused (If-None-Match) or replace a good result.
+        stored = bucket.head(object_key)
+        if stored is not None and stored.checksum_sha256 and 0 < stored.size <= max_result_bytes:
+            declared = s.declare_result(
+                up.job_id, up.lease_token, s3.hex_digest(stored.checksum_sha256), stored.size
+            )
+            if not declared:
+                raise HTTPException(status_code=409, detail="lease lost")
+            return JSONResponse({"already_stored": True})
+        if not s.declare_result(up.job_id, up.lease_token, up.sha256, up.size):
+            raise HTTPException(status_code=409, detail="lease lost")
+        target = bucket.put_target(object_key, up.sha256, up.size)
+        return UploadOut(url=target.url, headers=target.headers, expires_in=target.expires_in)
 
     @app.post("/heartbeat", dependencies=heartbeater)
     def heartbeat(ref: LeaseRef, s: Store) -> HeartbeatOut:
@@ -293,26 +406,69 @@ def create_app(
         return HeartbeatOut(ttl_seconds=ttl_seconds)
 
     @app.post("/complete", status_code=204, dependencies=worker)
-    def complete(done: Completion, s: Store) -> None:
+    def complete(done: Completion, s: Store):
+        if bucket is not None:
+            refused = _check_stored_result(done, s)
+            if refused is not None:
+                return refused
         try:
             accepted = s.complete(done.job_id, done.lease_token, done.result_key, now=clock())
         except ResultKeyMismatch:
             # Not the job's content address (ADR 0023). 422, not the 409 of a lost lease: the
             # worker must not read this as "someone else has it", and it is not transient.
             # The job id only: the key is the client's claim, not ours to log.
-            log.warning("result key refused for job %s", done.job_id)
-            metrics.result_rejected()
-            # "code" is for the worker: FastAPI's own 422s (a malformed body) carry none.
-            return JSONResponse(
-                status_code=422,
-                content={
-                    "detail": "result_key is not this job's content address",
-                    "code": "result_key_mismatch",
-                },
+            return _refuse(
+                "result_key_mismatch", "result_key is not this job's content address", done
             )
         if accepted is None:
             raise HTTPException(status_code=409, detail="lease lost")
         metrics.completed(accepted)
+        return None
+
+    def _signable(data_class: str) -> bool:
+        # Second guard (Q82), behind the AWS role's own scope: a broker not cleared for a class
+        # touches none of its objects, even for a lease it somehow holds.
+        return data_class in clearance
+
+    def _not_signable(job_id: str) -> Response:
+        log.error("data_class_not_signable for job %s", job_id)
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": "this broker may not sign for this job",
+                "code": "data_class_not_signable",
+            },
+        )
+
+    def _refuse(code: str, detail: str, ref: LeaseRef) -> Response:
+        # The job id only: the key and the hashes are the client's claims, not ours to log.
+        log.warning("%s for job %s", code, ref.job_id)
+        metrics.result_rejected()
+        # "code" is for the worker: FastAPI's own 422s (a malformed body) carry none.
+        return JSONResponse(status_code=422, content={"detail": detail, "code": code})
+
+    def _check_stored_result(done: Completion, s: JobStore) -> Response | None:
+        """S3 mode: before the job is recorded done, the object must be there and be what
+        /upload-url signed for (ADR 0025). None means "go on to the store's own checks"."""
+        facts = s.upload_facts(done.job_id, done.lease_token)
+        if facts is None or facts["state"] == "done":
+            return None  # not the holder (409 below), or a repeat of an already verified result
+        if result_key_for(facts) != done.result_key:
+            return None  # the store refuses it with the ADR 0023 code, before S3 is asked
+        if not _signable(facts["data_class"]):
+            return _not_signable(done.job_id)
+        head = bucket.head(s3.result_object_key(facts["data_class"], done.result_key))
+        if head is None:
+            return _refuse("result_missing", "no result object is stored for this job", done)
+        declared = (facts["result_sha256"], facts["result_size"])
+        if (
+            declared[0] is None
+            or head.size > max_result_bytes
+            or head.size != declared[1]
+            or head.checksum_sha256 != s3.b64_digest(declared[0])
+        ):
+            return _refuse("result_mismatch", "the stored result is not what was declared", done)
+        return None
 
     stop_tracing = tracing(app) if tracing else (lambda: None)
     return app
@@ -340,6 +496,9 @@ def _from_env() -> FastAPI | None:
     database_url = os.environ.get("FLEET_DATABASE_URL", "")
     if not database_url:
         raise ValueError("FLEET_DATABASE_URL is required (a postgresql:// URL)")
+    # S3 mode (ADR 0025) is all-or-nothing; a half-set deployment stops here, before any pool.
+    bucket = s3.bucket_from_env(os.environ)
+    max_result_bytes = s3.max_result_bytes_from_env(os.environ)
     pool = make_pool(database_url)
     flush_logs = telemetry.export_logs()  # a no-op without the [otel] extra and an endpoint
     # Set only while a rotation is under way (docs/secrets.md "Rotating broker tokens").
@@ -372,6 +531,8 @@ def _from_env() -> FastAPI | None:
             # Optional overrides of the worker rate limit; TokenBucket refuses non-positive values.
             worker_rate=float(os.environ.get("FLEET_WORKER_RATE", "20")),
             worker_burst=int(os.environ.get("FLEET_WORKER_BURST", "100")),
+            bucket=bucket,
+            max_result_bytes=max_result_bytes,
         )
     except BaseException:
         pool.close()  # a refused configuration (weak token, bad rate) leaves no pool or threads

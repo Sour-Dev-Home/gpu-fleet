@@ -58,7 +58,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     context_sha256   TEXT,                        -- NULL: no context (ADR 0012)
     data_class       TEXT,                        -- NULL: treated as footage (ADR 0015)
     enqueued_at      DOUBLE PRECISION,            -- broker wall clock; NULL for rows before ADR 0018
-    done_at          DOUBLE PRECISION             -- set by the first accepted completion
+    done_at          DOUBLE PRECISION,            -- set by the first accepted completion
+    result_sha256    TEXT,                        -- hex SHA-256 the worker declared at /upload-url (ADR 0025)
+    result_size      BIGINT                       -- and the length it declared
 );
 """
 
@@ -72,6 +74,8 @@ MIGRATIONS = [
     ("data_class", "TEXT"),
     ("enqueued_at", "DOUBLE PRECISION"),  # ADR 0018: queue age and the enqueue-to-done SLO
     ("done_at", "DOUBLE PRECISION"),
+    ("result_sha256", "TEXT"),  # ADR 0025: what /upload-url signed, checked again at /complete
+    ("result_size", "BIGINT"),
 ]
 
 # Serves the claim: the oldest available job, in FIFO order, without sorting. Done and dead
@@ -100,7 +104,8 @@ UPDATE jobs SET state = 'leased', lease_token = %(token)s,
 FROM candidate
 WHERE jobs.job_id = candidate.job_id
 RETURNING jobs.job_id, input_sha256, model, prompt_version,
-          lease_expires_at, attempts, context_sha256
+          lease_expires_at, attempts, context_sha256,
+          COALESCE(data_class, 'footage') AS data_class
 """
 
 
@@ -184,6 +189,7 @@ class Claim:
     lease_expires_at: float
     attempts: int
     context_sha256: str | None = None
+    data_class: str = "footage"  # the S3 key prefix (ADR 0025); a NULL in the table is footage
 
 
 @dataclass(frozen=True)
@@ -334,6 +340,48 @@ class JobStore:
                 (now + ttl_seconds, job_id, _digest(lease_token)),
             ).fetchone()
         return None if row is None else row["lease_expires_at"]
+
+    def holder_key(self, job_id: str, lease_token: str, result_key: str) -> tuple[str, str] | None:
+        """(result key, data class) of the job, both from its own row, never the caller's, if
+        the caller holds its lease, else None. Raises ResultKeyMismatch if `result_key` is not
+        that key (ADR 0023). Changes nothing: /upload-url asks S3 about the key only after this."""
+        with self.pool.connection() as conn:
+            job = conn.execute(
+                "SELECT input_sha256, model, prompt_version, context_sha256,"
+                " COALESCE(data_class, 'footage') AS data_class FROM jobs"
+                " WHERE job_id = %s AND lease_token = %s AND state = 'leased'",
+                (job_id, _digest(lease_token)),
+            ).fetchone()
+        if job is None:
+            return None
+        key = result_key_for(job)
+        if key != result_key:
+            raise ResultKeyMismatch(job_id)
+        return key, job["data_class"]
+
+    def declare_result(self, job_id: str, lease_token: str, sha256: str, size: int) -> bool:
+        """Record the SHA-256 (hex) and length of the result the lease holder is about to upload,
+        or of the one already stored (ADR 0025). /complete compares the stored object with this.
+        A second call replaces the first. False if the caller no longer holds the lease."""
+        with self.pool.connection() as conn:
+            row = conn.execute(
+                "UPDATE jobs SET result_sha256 = %s, result_size = %s"
+                " WHERE job_id = %s AND lease_token = %s AND state = 'leased' RETURNING job_id",
+                (sha256, size, job_id, _digest(lease_token)),
+            ).fetchone()
+        return row is not None
+
+    def upload_facts(self, job_id: str, lease_token: str) -> dict[str, Any] | None:
+        """For the holder of the lease on a leased or done job: the declared upload and the
+        fields of its result key. None for anyone else, so nothing is revealed about the job."""
+        with self.pool.connection() as conn:
+            return conn.execute(
+                "SELECT state, input_sha256, model, prompt_version, context_sha256,"
+                " COALESCE(data_class, 'footage') AS data_class,"
+                " result_sha256, result_size FROM jobs"
+                " WHERE job_id = %s AND lease_token = %s AND state IN ('leased', 'done')",
+                (job_id, _digest(lease_token)),
+            ).fetchone()
 
     def complete(
         self, job_id: str, lease_token: str, result_key: str, now: float | None = None

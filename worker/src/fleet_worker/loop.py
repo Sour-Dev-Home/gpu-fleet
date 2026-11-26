@@ -5,16 +5,18 @@ fakes, phase 1 plugs in the HTTP broker client and phase 3 an S3 store behind pr
 """
 
 import logging
+import random
 import threading
 import time
 from collections.abc import Callable
-from typing import Literal, Protocol
+from typing import Literal, Protocol, TypeVar
 
 from . import telemetry
 from .backoff import Backoff
 from .protocol import Job, Lease
 
 log = logging.getLogger(__name__)
+T = TypeVar("T")
 
 
 class LeaseLost(Exception):
@@ -23,6 +25,34 @@ class LeaseLost(Exception):
 
 class TransientError(Exception):
     """The broker is unreachable or failing (network error, 5xx). Wait and try again."""
+
+
+RETRIES = 3  # after the first try: waits of 1, 2 and 4 seconds, each up to 50% longer
+
+
+def retry_transient(
+    fn: Callable[[], T],
+    sleep: Callable[[float], None] = time.sleep,
+    rng: Callable[[], float] = random.random,
+    between: Callable[[], None] = lambda: None,
+) -> T:
+    """Call fn, retrying a TransientError up to RETRIES times with exponential backoff and jitter.
+
+    A blip at S3 or a 503 from the broker should not cost the job its attempt (3 attempts
+    dead-letter it). `between` runs after each wait, before the retry: the Worker passes its
+    keepalive so the lease is renewed while it waits. Anything but TransientError, and the last
+    TransientError, propagate."""
+    for attempt in range(RETRIES + 1):
+        try:
+            return fn()
+        except TransientError as e:
+            if attempt == RETRIES:
+                raise
+            delay = 2.0**attempt * (1 + rng() * 0.5)
+            log.warning("transient failure, retrying in %.1fs: %s", delay, e)
+            sleep(delay)
+            between()
+    raise AssertionError("unreachable")
 
 
 class ResultRejected(SystemExit):
@@ -38,6 +68,36 @@ class ResultRejected(SystemExit):
             "formula differs from the broker's; stopping"
         )
         self.job_id = job_id
+
+
+class ResultNotAccepted(Exception):
+    """/complete answered 422 with code result_missing or result_mismatch (ADR 0025): the broker
+    looked at the stored object and it is not there or not what was declared. The lease is fine
+    and this worker's key formula is fine, so unlike ResultRejected it does not stop the worker:
+    the lease expires, the job is retried and the failures count toward the dead-letter limit."""
+
+    def __init__(self, job_id: str, code: str):
+        super().__init__(f"the broker refused the stored result of job {job_id}: {code}")
+        self.job_id = job_id
+        self.code = code
+
+
+class InvalidInput(Exception):
+    """The job's input cannot be used: it is missing, or its bytes are not the ones the job names.
+    Nothing is run or stored. Like InvalidResult, the lease is left to expire (ADR 0025)."""
+
+
+class InputMismatch(InvalidInput):
+    """Downloaded bytes whose SHA-256 differs from the job's input_sha256 or context_sha256."""
+
+
+class InputMissing(InvalidInput):
+    """No object at the presigned URL (S3 answers 403 or 404), or no URL for a named context."""
+
+
+class UploadRefused(Exception):
+    """S3 refused the result upload (expired URL, wrong length or checksum). Not stored, so not
+    completed; the lease expires and the job is retried, as for an invalid result."""
 
 
 class InvalidResult(Exception):
@@ -78,6 +138,13 @@ class ResultStore(Protocol):
     def put(self, key: str, data: bytes) -> None: ...
 
 
+class UrlResultStore(ResultStore, Protocol):
+    """A store bound to one lease whose input arrives by presigned URL (fleet_worker.url_store)."""
+
+    def fetch_inputs(self) -> None:
+        """Download the input (and context) and check their hashes; raise InvalidInput if wrong."""
+
+
 class Runner(Protocol):
     """Does the actual work (a model call, a transcription) and returns the result bytes.
 
@@ -105,6 +172,9 @@ class Worker:
         clock: Callable[[], float] = time.monotonic,
         validate: Callable[[Job, bytes], None] = require_nonempty,
         heartbeat_poll_seconds: float = 1.0,
+        url_store: Callable[[Lease], UrlResultStore] | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        rng: Callable[[], float] = random.random,
     ) -> None:
         if not isinstance(getattr(runner, "prompt_versions", None), frozenset):
             raise TypeError(f"runner {runner!r} must declare prompt_versions (a frozenset)")
@@ -112,6 +182,11 @@ class Worker:
             raise TypeError(f"runner {runner!r} must declare models (a frozenset)")
         self.broker = broker
         self.store = store
+        # Builds the store for a lease that carries presigned URLs (S3 mode, ADR 0025); the
+        # `store` above serves every other lease, exactly as before.
+        self.url_store = url_store
+        # Used to wait between retries of an upload or a completion (retry_transient).
+        self._retry_sleep, self._retry_rng = sleep, rng
         self.runner = runner
         self.clock = clock
         self.validate = validate
@@ -134,8 +209,18 @@ class Worker:
             if self.lease.needs_renewal(self.clock()):
                 self.lease = self.broker.heartbeat(self.lease)
 
-    def _run_with_heartbeat(self, job: Job) -> bytes:
-        """Run the runner while a background thread keeps the lease alive.
+    def _store_for(self, lease: Lease) -> ResultStore:
+        if lease.input_url is None:
+            return self.store
+        if self.url_store is None:
+            # Falling back to the local store would skip the input check and write where the
+            # broker will never look.
+            raise RuntimeError("the broker sent presigned URLs but this worker has no URL store")
+        return self.url_store(lease)
+
+    def _run_with_heartbeat(self, job: Job, store: ResultStore) -> bytes:
+        """Fetch and check the input if it comes by URL, then run the runner, while a background
+        thread keeps the lease alive (a large download can outlast the lease TTL).
 
         Raises LeaseLost (after the runner returns) if the broker refused a renewal, and
         re-raises anything fatal the heartbeat hit. A TransientError (broker briefly
@@ -159,6 +244,9 @@ class Worker:
         thread = threading.Thread(target=beat, name="heartbeat", daemon=True)
         thread.start()
         try:
+            fetch = getattr(store, "fetch_inputs", None)
+            if fetch is not None:
+                fetch()  # raises InvalidInput: the runner never sees unverified bytes
             result = self.runner(job, self.keepalive)
         finally:
             done.set()
@@ -168,9 +256,14 @@ class Worker:
                 # The work is done and valid bytes are content-addressed: keep them, so whoever
                 # holds the job now finds the result and completes without running it again.
                 self.validate(job, result)
-                self.store.put(job.result_key, result)
+                store.put(job.result_key, result)
             raise problem[0]
         return result
+
+    def _retry(self, fn: Callable[[], T]) -> T:
+        """fn with retry_transient, renewing the lease between attempts (a LeaseLost from that
+        renewal ends the retries: the job is no longer ours to finish)."""
+        return retry_transient(fn, self._retry_sleep, self._retry_rng, between=self.keepalive)
 
     def run_once(self) -> Outcome | None:
         """Lease and process one job. Returns None when the broker has no work."""
@@ -212,22 +305,23 @@ class Worker:
                 "enqueue jobs for this runner or start the worker with the matching FLEET_RUNNER."
             )
         key = job.result_key
+        store = self._store_for(self.lease)
         # IDs and labels only (jsonlog.ALLOWED_EXTRAS): never the input or the result.
         fields = {"job_id": job.job_id, "model": job.model, "prompt_version": job.prompt_version}
-        if self.store.exists(key):
+        if store.exists(key):
             with telemetry.span("complete", **{"fleet.cached": True}):
-                self.broker.complete(self.lease, key)
+                self._retry(lambda: self.broker.complete(self.lease, key))
             log.info("job completed from a stored result", extra={**fields, "status": "cached"})
             return "cached"
         with telemetry.span("run"):  # the model call: where a slow job spends its time
-            result = self._run_with_heartbeat(self.lease.job)
+            result = self._run_with_heartbeat(self.lease.job, store)
         self.validate(self.lease.job, result)  # raises InvalidResult: nothing stored or completed
         with telemetry.span("store"):
-            self.store.put(key, result)
+            self._retry(lambda: store.put(key, result))
         with telemetry.span(
             "complete"
         ):  # its POST carries traceparent: the broker's span nests here
-            self.broker.complete(self.lease, key)
+            self._retry(lambda: self.broker.complete(self.lease, key))
         log.info("job completed", extra={**fields, "status": "ran"})
         return "ran"
 
@@ -254,8 +348,8 @@ class Worker:
             except ResultRejected as e:
                 log.error("broker refused the result key for job %s; stopping", e.job_id)
                 raise  # not retried and not skipped: see the class docstring
-            except InvalidResult as e:
-                log.warning("invalid result, not stored: %s", e)
+            except (InvalidResult, InvalidInput, UploadRefused, ResultNotAccepted) as e:
+                log.warning("job not completed, lease left to expire: %s", e)
                 sleep(backoff.next_delay())  # a runner that always fails must not spin
                 continue
             except TransientError as e:

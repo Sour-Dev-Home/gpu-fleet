@@ -34,6 +34,50 @@ terraform plan "-out=tfplan"     # quoted: PowerShell splits -flag=name.ext at t
 terraform apply tfplan
 ```
 
+## The broker's role (`fleet/broker_role.tf`, ADR 0025)
+
+The broker runs on Google Cloud and signs S3 URLs, so it needs AWS credentials without a stored key. The role
+`fleet-broker` trusts `accounts.google.com` (built in to AWS: no provider resource) for tokens whose subject is
+one of your service accounts' numeric IDs AND whose audience is `federation_audience`. It may read `inputs/open/*` and
+`results/open/*` and write `results/open/*` of the results bucket (the data class is in the key, Q82), nothing else.
+
+Apply steps (from `infra/aws/fleet`, signed in as above). The unique ID is not the email; it is not secret in
+the way a key is, but it stays out of git:
+
+```powershell
+$sa = gcloud iam service-accounts describe <broker service account email> --format="value(uniqueId)"
+# keep it in the local vault (docs/secrets.md), then load it for this shell, as a JSON list:
+$env:TF_VAR_broker_google_sa_unique_id = "[`"$sa`"]"   # phase 6 adds the jobs account's ID to this list
+terraform init
+terraform plan "-out=tfplan"     # review with the infra-reviewer agent, then apply as above
+terraform apply tfplan
+terraform output broker_role_arn   # FLEET_AWS_ROLE_ARN: contains the account ID, so never commit it
+```
+
+Workers in S3 mode need `FLEET_RESULTS_HOST` = `<bucket>.s3.amazonaws.com` (us-east-1; `<bucket>.s3.<region>.amazonaws.com`
+elsewhere): they refuse presigned URLs for any other host. After the apply, check once with the role (not your
+login) that a HEAD of a key that does not exist answers 404, not 403 (ADR 0025: ListBucket on the bucket has no
+condition, so S3 says 404 for a missing key; a 403 means the role or bucket policy is wrong).
+
+The Cloud Run wiring (`FLEET_RESULTS_BUCKET`, `FLEET_AWS_ROLE_ARN`, `FLEET_AWS_AUDIENCE`, `AWS_REGION`) is a
+follow-up change in `infra/gcp`; until then the broker runs in local mode.
+
+Before relying on the signed constraints, measure what S3 enforces on a presigned PUT. It writes only throwaway
+keys under `results/probe/` and deletes them, using your own login (from the repository root):
+
+```powershell
+$env:AWS_REGION = "us-east-1"
+# `aws login` sessions need botocore[crt], which the broker doesn't ship: hand the session over as env vars instead
+aws configure export-credentials --profile fleet --format powershell | Invoke-Expression
+uv run --directory broker python ../scripts/probe-presign.py --bucket (terraform -chdir=infra/aws/fleet output -raw results_bucket)
+Remove-Item Env:AWS_ACCESS_KEY_ID, Env:AWS_SECRET_ACCESS_KEY, Env:AWS_SESSION_TOKEN, Env:AWS_CREDENTIAL_EXPIRATION -ErrorAction SilentlyContinue
+```
+
+Last run (2026-11-26): ENFORCED on all three (403 longer body, 400 other SHA-256, 412 overwrite).
+
+Three lines say ENFORCED or NOT ENFORCED for: a longer body than signed, a body with another SHA-256, and a
+second PUT to the same key. Not enforced is safe (`/complete` HEADs the object), but tell the maintainer.
+
 ## If bootstrap's local state is lost
 
 Running `apply` again would create a *second* bucket with a new random suffix. Instead, rebuild the state
