@@ -25,6 +25,7 @@ from typing import Annotated, Literal, get_args
 
 import psycopg
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -301,9 +302,14 @@ def create_app(
             # The job id only: the key is the client's claim, not ours to log.
             log.warning("result key refused for job %s", done.job_id)
             metrics.result_rejected()
-            raise HTTPException(
-                status_code=422, detail="result_key is not this job's content address"
-            ) from None
+            # "code" is for the worker: FastAPI's own 422s (a malformed body) carry none.
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "detail": "result_key is not this job's content address",
+                    "code": "result_key_mismatch",
+                },
+            )
         if accepted is None:
             raise HTTPException(status_code=409, detail="lease lost")
         metrics.completed(accepted)

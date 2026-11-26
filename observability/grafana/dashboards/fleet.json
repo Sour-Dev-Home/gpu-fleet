@@ -136,7 +136,7 @@
     },
     {
       "id": 9, "type": "timeseries", "title": "Trouble signs",
-      "description": "Re-issued leases: a worker vanished mid-job. Busy: the database answered 503. Rate limited: a worker went over 20 requests/s (429). Workers retry both. Result key refused: a worker named a result key that is not the job's content address (never retried; a bug or a bad worker).",
+      "description": "Re-issued leases: a worker vanished mid-job. Busy: the database answered 503. Rate limited: a worker went over 20 requests/s (429). Workers retry both. Result key refused: a worker named a result key that is not the job's content address; the completion is not retried; the job is re-leased after its lease expires and counts toward the dead-letter limit.",
       "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [

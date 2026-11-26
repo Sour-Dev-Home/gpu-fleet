@@ -20,6 +20,16 @@ def _is_loopback_ip(host: str) -> bool:
         return False
 
 
+def _error_code(r: httpx.Response) -> str | None:
+    """The machine-readable "code" of a broker error body, or None if there is none."""
+    try:
+        body = r.json()
+    except ValueError:
+        return None
+    code = body.get("code") if isinstance(body, dict) else None
+    return code if isinstance(code, str) else None
+
+
 class HttpBroker:
     """Talks to the broker. `client` carries the base URL and the bearer token.
 
@@ -108,8 +118,8 @@ class HttpBroker:
             # The result is already stored under its content key, so nothing is lost:
             # whoever holds the job now will find it and complete cheaply.
             raise LeaseLost(lease.job.job_id)
-        if r.status_code == 422:
-            # The broker recomputed the content address and it differs (ADR 0023). Retrying
-            # sends the same key, and the lease is not lost: its own outcome.
+        if r.status_code == 422 and _error_code(r) == "result_key_mismatch":
+            # The broker recomputed the content address and it differs (ADR 0023). Only this code:
+            # FastAPI answers 422 for a malformed body too, and that stays an HTTP error.
             raise ResultRejected(lease.job.job_id)
         r.raise_for_status()

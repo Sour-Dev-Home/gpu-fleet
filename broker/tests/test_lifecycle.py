@@ -76,6 +76,19 @@ def test_complete_retry_is_accepted_but_a_different_result_is_not(open_store):
     assert store.get("j0")["result_key"] == KEY
 
 
+def test_a_worker_that_always_sends_a_wrong_key_dead_letters_the_job(open_store):
+    store = store_with(open_store, max_attempts=2)
+    wrong = "0" * 64
+    for attempt in (1, 2):
+        c = store.claim(NOW + attempt * 100, TTL, **ANY)
+        assert c is not None and c.attempts == attempt
+        with pytest.raises(ResultKeyMismatch):
+            store.complete("j0", c.lease_token, wrong)
+    assert store.claim(NOW + 1000, TTL, **ANY) is None  # lease 2 expired: no attempts left
+    row = store.get("j0")
+    assert (row["state"], row["result_key"]) == ("dead", None)
+
+
 def test_a_key_that_is_not_the_jobs_is_refused_and_leaves_the_lease(open_store):
     store = store_with(open_store, 2)
     c = store.claim(NOW, TTL, **ANY)

@@ -3,6 +3,7 @@
 **Status:** Accepted for local use. Auth must be reviewed (security review, maintainer sign-off) before the broker
 is reachable from the internet in phase 4.
 **Date:** 2026-11-25
+**Amended by** [0023](0023-broker-verifies-result-keys.md) (2026-11-25): the 422 row below.
 
 ## Context
 The worker's reaction depends on *why* a request failed. One shared token is enough while the broker runs only
@@ -16,6 +17,7 @@ Status codes are chosen by what the caller should do:
 | 200 / 201 | Done | Continue |
 | 204 from `/lease` | No work | Back off ([0008](0008-short-polling-with-backoff.md)) |
 | 409 from `/heartbeat`, `/complete` | Caller no longer owns the job | Raise `LeaseLost`, don't retry |
+| 422 from `/complete` with `"code": "result_key_mismatch"` | The result key is not the job's content address (0023) | Raise `ResultRejected`: stop the worker, don't retry. Any other 422 (a malformed body) is an HTTP error: stop loudly |
 | 401 | Bad or missing token | Configuration error: stop loudly, never treat as lease lost |
 | 5xx, network errors | Broker trouble | Retry with backoff |
 

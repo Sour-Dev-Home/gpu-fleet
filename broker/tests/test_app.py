@@ -274,7 +274,10 @@ def test_a_result_key_that_is_not_the_jobs_is_422_and_changes_nothing(worker, op
     lease = worker.post("/lease", json=CAPS).json()
     done = {"job_id": "j0", "lease_token": lease["lease_token"], "result_key": "f" * 64}
     with caplog.at_level(logging.WARNING, logger="fleet_broker"):
-        assert worker.post("/complete", json=done).status_code == 422
+        r = worker.post("/complete", json=done)
+    assert r.status_code == 422
+    assert r.json()["code"] == "result_key_mismatch"  # machine-readable: a schema 422 has none
+    assert isinstance(r.json()["detail"], str)
     row = open_store().get("j0")
     assert (row["state"], row["result_key"]) == ("leased", None)  # still the worker's
     assert "j0" in caplog.text
