@@ -25,6 +25,7 @@ import json
 import math
 import os
 import random
+import re
 import sys
 import time
 import urllib.error
@@ -85,13 +86,15 @@ def backoff(attempt: int, retry_after: float | None, rand=None) -> float:
     return max(wait, retry_after or 0.0)
 
 
-def post_job_with_retries(base_url: str, token: str, job: dict[str, str]) -> int:
+def post_job_with_retries(
+    base_url: str, token: str, job: dict[str, str], allow_http: bool = False
+) -> int:
     """POST /jobs, retrying 503 and connection errors. Safe: the endpoint is INSERT OR IGNORE.
     4xx is never retried. Returns the last status, or 0 if no attempt got an answer."""
     status = 0
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            status = post_job(base_url, token, job)
+            status = post_job(base_url, token, job, allow_http)
         except (urllib.error.URLError, ConnectionError, TimeoutError):
             status = 0
         if status not in (0, 503):
@@ -109,13 +112,24 @@ def _is_loopback_ip(host: str) -> bool:
         return False
 
 
+_SERVICE_NAME = re.compile(r"[a-z][a-z0-9-]*")  # one DNS label, not an IP in any spelling
+
+
 def check_url(base_url: str, allow_http: bool) -> None:
     """The admin token rides on every request: never in cleartext to a remote host.
-    Plain http is fine for loopback, or when the caller opts in (Compose's http://broker:8000)."""
+    Plain http is fine for loopback, or, with the opt-in, for a single-label name such as
+    Compose's http://broker:8000. Userinfo, backslashes and %-escapes are refused: urllib and
+    urlsplit disagree about the host in `http://evil.com\\@127.0.0.1`, and the guard must see
+    the host urllib connects to."""
     url = urllib.parse.urlsplit(base_url)
-    host = url.hostname or ""
+    if any(c in url.netloc for c in "@\\%"):
+        raise ValueError(
+            "refusing a broker URL with userinfo, a backslash or a %-escape in its host"
+        )
+    host = (url.hostname or "").lower()
     loopback = host == "localhost" or _is_loopback_ip(host)
-    if url.scheme == "https" or (url.scheme == "http" and (loopback or allow_http)):
+    service = _SERVICE_NAME.fullmatch(host) is not None
+    if url.scheme == "https" or (url.scheme == "http" and (loopback or (allow_http and service))):
         return
     raise ValueError(
         f"refusing to send the admin token over {url.scheme}://{host} "
@@ -137,9 +151,7 @@ def _open(req: urllib.request.Request, timeout: float):  # patched in tests
     return _opener.open(req, timeout=timeout)
 
 
-def post_job(base_url: str, token: str, job: dict[str, str], allow_http: bool | None = None) -> int:
-    if allow_http is None:
-        allow_http = os.environ.get("FLEET_ALLOW_HTTP") == "1"
+def post_job(base_url: str, token: str, job: dict[str, str], allow_http: bool = False) -> int:
     check_url(base_url, allow_http)
     req = urllib.request.Request(
         f"{base_url.rstrip('/')}/jobs",
@@ -154,6 +166,9 @@ def post_job(base_url: str, token: str, job: dict[str, str], allow_http: bool | 
         status = Status(e.code)
         status.retry_after = parse_retry_after(e.headers.get("Retry-After", ""))
         return status
+    except ValueError:
+        # http.client's "Invalid header value b'Bearer <token>'" would put the token in a traceback.
+        raise ValueError("the request could not be sent (invalid header or URL)") from None
 
 
 def parse_retry_after(header: str) -> float | None:
@@ -189,21 +204,25 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
     args = p.parse_args(argv)
     model = args.model or default_model(args.prompt_version)
 
-    token = env.get("FLEET_ADMIN_TOKEN")
+    token = env.get("FLEET_ADMIN_TOKEN", "").strip()  # a secret store may add "\n"
     if not token:
         print("fleet-enqueue: missing FLEET_ADMIN_TOKEN", file=sys.stderr)
         return 2
+    if not (token.isascii() and token.isprintable() and " " not in token):
+        # Never echoed: it is a secret, and an HTTP header cannot carry these characters.
+        print("fleet-enqueue: FLEET_ADMIN_TOKEN has spaces or control characters", file=sys.stderr)
+        return 2
     base_url = env.get("FLEET_BROKER_URL", "http://127.0.0.1:8000")
+    allow_http = env.get("FLEET_ALLOW_HTTP") == "1"  # the one place the opt-in is read
     try:
-        check_url(base_url, env.get("FLEET_ALLOW_HTTP") == "1")
-    except ValueError as e:
+        check_url(base_url, allow_http)
+        statuses = [
+            post_job_with_retries(base_url, token, job, allow_http)
+            for job in demo_jobs(args.demo, args.run, model, args.prompt_version, args.data_class)
+        ]
+    except ValueError as e:  # messages here never contain the token
         print(f"fleet-enqueue: {e}", file=sys.stderr)
         return 2
-
-    statuses = [
-        post_job_with_retries(base_url, token, job)
-        for job in demo_jobs(args.demo, args.run, model, args.prompt_version, args.data_class)
-    ]
     added = statuses.count(201)
     print(f"fleet-enqueue: {added}/{len(statuses)} jobs added (run {args.run})")
     if added != len(statuses):

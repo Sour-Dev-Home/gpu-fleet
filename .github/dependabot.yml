@@ -21,6 +21,26 @@ updates:
     cooldown: { default-days: 7 } # let a fresh release age before a bump is proposed
     groups:
       python: { patterns: ["*"] }
+  # CI tools (pre-commit, uv) with hashes: a uv-compiled requirements.txt is pip-compile format, which the
+  # pip ecosystem updates (hashes included); the uv ecosystem reads uv.lock / pyproject. Source: GitHub docs,
+  # "Dependabot supported ecosystems" (pip row lists pip-compile).
+  - package-ecosystem: pip
+    directory: /.github/ci
+    schedule: { interval: weekly }
+    cooldown: { default-days: 7 }
+    groups:
+      ci-tools: { patterns: ["*"] }
+    ignore:
+      # uv stays in step with the uv image in the Dockerfiles (bumped by hand, together).
+      - dependency-name: uv
+  # Frozen hook SHAs in .pre-commit-config.yaml (the `# frozen: vX` comment is the tag).
+  # Source: GitHub docs, "Dependabot supported ecosystems" (a `pre-commit` row with YAML value pre-commit).
+  - package-ecosystem: pre-commit
+    directory: /
+    schedule: { interval: weekly }
+    cooldown: { default-days: 7 }
+    groups:
+      pre-commit-hooks: { patterns: ["*"] }
   - package-ecosystem: docker-compose # image digests in compose files (grafana/otel-lgtm, ADR 0018)
     directory: /
     schedule: { interval: weekly }

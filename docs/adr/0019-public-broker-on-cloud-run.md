@@ -48,6 +48,7 @@ stop spending.
 - The Cloud Run max-instances cap and the rate limits bound throughput and compute, not the whole bill:
   unauthenticated requests are still billed per request (docs/security.md, open item). Budgets only alert. The
   existing console budget is adopted into Terraform by import, as with AWS (ADR 0017).
+  *Amended 2026-11-25: billing wording corrected (see docs/security.md).*
 - Every request from the internet reaches the app, so the token check must stay cheap and constant-time,
   and rate limits apply after authentication.
 - ADR 0017's "Google OIDC trust in phase 6" moves to phase 4.

@@ -39,7 +39,7 @@ def test_broker_and_worker_are_locked_down():
         assert "read_only: true" in block, name
         assert "cap_drop: [ALL]" in block, name
         assert 'security_opt: ["no-new-privileges:true"]' in block, name
-        assert "tmpfs: [/tmp]" in block, name
+        assert 'tmpfs: ["/tmp:size=64m,mode=1777,noexec,nosuid,nodev"]' in block, name
 
 
 def test_postgres_cannot_gain_privileges():

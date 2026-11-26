@@ -21,13 +21,62 @@ class _Resp:
 
 @pytest.mark.parametrize(
     "url",
-    ["http://example.com", "http://10.0.0.5:8000", "http://127.0.0.1.evil.com", "ftp://127.0.0.1"],
+    [
+        "http://example.com",
+        "http://10.0.0.5:8000",
+        "http://127.0.0.1.evil.com",
+        "ftp://127.0.0.1",
+        # The guard and urllib must agree on the host: these two fooled urlsplit().hostname.
+        "http://evil.com\\@127.0.0.1",
+        "http://evil.com%2f@127.0.0.1",
+        "http://user@127.0.0.1",
+        "http://[::1%2f]:8000",  # a %-escape with no '@': ip_address() reads it as a scope id
+        "http://user:pw@localhost:8000",
+    ],
 )
 def test_plain_http_to_a_remote_host_is_refused(monkeypatch, url):
-    monkeypatch.delenv("FLEET_ALLOW_HTTP", raising=False)
     monkeypatch.setattr(enqueue, "_open", lambda *a, **k: pytest.fail("request was sent"))
     with pytest.raises(ValueError, match="refusing"):
         enqueue.post_job(url, "t", {"job_id": "j"})
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["http://evil.com", "http://10.0.0.5", "http://[::2]", "http://167772161", "http://a.b"],
+)
+def test_the_opt_in_covers_only_single_label_hostnames(monkeypatch, url):
+    monkeypatch.setattr(enqueue, "_open", lambda *a, **k: pytest.fail("request was sent"))
+    with pytest.raises(ValueError, match="refusing"):
+        enqueue.post_job(url, "t", {"job_id": "j"}, allow_http=True)
+
+
+def test_main_strips_the_admin_token(monkeypatch):
+    sent = []
+    monkeypatch.setattr(enqueue, "_open", lambda req, timeout: sent.append(req) or _Resp())
+    env = {"FLEET_ADMIN_TOKEN": ADMIN + "\n", "FLEET_BROKER_URL": "https://example.com"}
+    assert main(["--demo", "1"], env=env) == 0
+    assert sent[0].get_header("Authorization") == f"Bearer {ADMIN}"
+
+
+def test_a_malformed_token_never_reaches_the_output(monkeypatch, capsys):
+    monkeypatch.setattr(enqueue, "_open", lambda *a, **k: pytest.fail("request was sent"))
+    # http.client would raise "Invalid header value b'Bearer <token>'": the secret in a traceback.
+    bad = ADMIN[:10] + "\n" + ADMIN[10:]
+    env = {"FLEET_ADMIN_TOKEN": bad, "FLEET_BROKER_URL": "http://127.0.0.1:1"}
+    assert main(["--demo", "1"], env=env) == 2
+    out = capsys.readouterr()
+    for text in (out.out, out.err):
+        assert ADMIN[:10] not in text and ADMIN[10:] not in text
+
+
+def test_a_header_error_from_the_transport_names_no_token(monkeypatch):
+    def boom(req, timeout):
+        raise ValueError(f"Invalid header value {req.get_header('Authorization')!r}")
+
+    monkeypatch.setattr(enqueue, "_open", boom)
+    with pytest.raises(ValueError) as e:
+        enqueue.post_job("https://example.com", ADMIN, {"job_id": "j"})
+    assert ADMIN not in str(e.value) and e.value.__suppress_context__
 
 
 def test_main_exits_2_for_a_refused_url(monkeypatch, capsys):
@@ -57,19 +106,24 @@ def test_loopback_and_https_are_allowed(monkeypatch, url):
 
 def test_the_opt_in_allows_plain_http_to_a_service_name(monkeypatch):
     monkeypatch.setattr(enqueue, "_open", lambda req, timeout: _Resp())
-    monkeypatch.setenv("FLEET_ALLOW_HTTP", "1")
-    assert enqueue.post_job("http://broker:8000", "t", {"job_id": "j"}) == 201
-    monkeypatch.delenv("FLEET_ALLOW_HTTP")
     assert enqueue.post_job("http://broker:8000", "t", {"job_id": "j"}, allow_http=True) == 201
 
 
+def test_post_job_ignores_the_process_environment(monkeypatch):
+    # The opt-in is read once, from main's env, and passed down.
+    monkeypatch.setenv("FLEET_ALLOW_HTTP", "1")
+    monkeypatch.setattr(enqueue, "_open", lambda *a, **k: pytest.fail("request was sent"))
+    with pytest.raises(ValueError, match="refusing"):
+        enqueue.post_job("http://broker:8000", "t", {"job_id": "j"})
+
+
 def test_main_honours_the_opt_in_from_its_env(monkeypatch):
-    monkeypatch.delenv("FLEET_ALLOW_HTTP", raising=False)
     monkeypatch.setattr(enqueue, "_open", lambda req, timeout: _Resp())
     env = {"FLEET_ADMIN_TOKEN": ADMIN, "FLEET_BROKER_URL": "http://broker:8000"}
     assert main(["--demo", "1"], env=env) == 2
-    monkeypatch.setenv("FLEET_ALLOW_HTTP", "1")  # post_job reads the process environment too
     assert main(["--demo", "1"], env=env | {"FLEET_ALLOW_HTTP": "1"}) == 0
+    evil = env | {"FLEET_ALLOW_HTTP": "1", "FLEET_BROKER_URL": "http://evil.com"}
+    assert main(["--demo", "1"], env=evil) == 2
 
 
 def test_a_redirect_is_reported_not_followed(monkeypatch):
