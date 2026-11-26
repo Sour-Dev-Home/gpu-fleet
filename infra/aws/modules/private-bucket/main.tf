@@ -134,7 +134,7 @@ data "aws_iam_policy_document" "tls_only" {
     content {
       sid     = "DenyDataAccessExceptAllowedRoles"
       effect  = "Deny"
-      actions = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+      actions = ["s3:*Object*"]
       resources = [
         "${aws_s3_bucket.this.arn}/inputs/*",
         "${aws_s3_bucket.this.arn}/results/*",

@@ -1,5 +1,6 @@
 import http.client
 import threading
+import time
 from http.server import ThreadingHTTPServer
 
 import pytest
@@ -38,7 +39,8 @@ def test_an_oversized_body_is_acknowledged_and_ignored(served):
 
 
 def open_alert(policy: str = POLICY) -> bytes:
-    return push({"incident": {"state": "open", "policy_name": policy}})
+    incident = {"state": "open", "policy_name": policy, "started_at": int(time.time())}
+    return push({"version": "1.2", "incident": incident})
 
 
 def test_an_open_alert_on_the_alert_path_trips_the_switch(served):

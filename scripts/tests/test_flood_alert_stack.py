@@ -110,3 +110,12 @@ def test_readme_has_the_flood_drill_with_a_fake_open_incident():
 def test_the_comment_explaining_service_level_scaling_exists():
     for f in ("cloudrun.tf", "killswitch.tf"):
         assert "maxScale" in (STACK / f).read_text(encoding="utf-8"), f
+
+
+def test_the_flood_condition_counts_4xx_except_429():
+    # I3: 429 is Cloud Run's "no free instance" and the broker's own rate limit: load shedding doing its job,
+    # not a flood of bad requests, and it must not trip the kill switch.
+    b = res("monitoring.tf", "google_monitoring_alert_policy", "broker_4xx")
+    f = re.search(r'filter\s*=\s*"(.*)"', b).group(1).replace('\\"', '"')
+    assert 'metric.labels.response_code_class = "4xx"' in f
+    assert 'metric.labels.response_code != "429"' in f

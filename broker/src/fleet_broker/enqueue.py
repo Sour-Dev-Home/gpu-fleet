@@ -11,7 +11,7 @@
 Reads FLEET_ADMIN_TOKEN and FLEET_BROKER_URL (default http://127.0.0.1:8000). Plain http is
 refused unless the host is loopback or FLEET_ALLOW_HTTP=1; redirects are never followed. In Compose it
 runs inside the broker container, which already holds the admin token (ADR 0014):
-  docker compose run --rm broker fleet-enqueue --demo 20
+  docker compose run --rm broker fleet-enqueue --demo 20 --data-class open
 
 Demo inputs are numbered, so input i always hashes the same: a second run under a new label
 gets new jobs whose Results already exist, and workers complete them as "cached".

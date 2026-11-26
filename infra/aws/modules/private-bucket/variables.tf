@@ -10,9 +10,8 @@ variable "versioning" {
 }
 
 variable "data_allowed_principal_arns" {
-  description = "Role ARNs (wildcards allowed) that alone may Get/Put/Delete objects under inputs/ and results/; everyone else is denied. Empty (the default) adds no such lock. Role ARNs, not assumed-role session ARNs."
+  description = "Role ARNs (wildcards allowed) that alone may Get/Put/Delete objects under inputs/ and results/; everyone else is denied. Required (no default) so a forgotten argument is a plan error, not an unlocked bucket; pass [] explicitly for no lock. Role ARNs, not assumed-role session ARNs."
   type        = list(string)
-  default     = []
 }
 
 variable "noncurrent_days" {

@@ -42,8 +42,8 @@ variable "admin_principal_arn" {
   sensitive   = true
 
   validation {
-    condition     = can(regex("^arn:aws:iam::[0-9]{12}:(user|role)/[A-Za-z0-9+=,.@_/*-]+$", var.admin_principal_arn))
-    error_message = "admin_principal_arn must be an IAM user or role ARN: arn:aws:iam::<12 digits>:user/<path and name> or :role/<path and name> (not an assumed-role session ARN)."
+    condition     = can(regex("^arn:aws:iam::[0-9]{12}:(user|role)/[A-Za-z0-9+=,.@_/-]+$", var.admin_principal_arn))
+    error_message = "admin_principal_arn must be an IAM user or role ARN: arn:aws:iam::<12 digits>:user/<path and name> or :role/<path and name> (not an assumed-role session ARN, and no * wildcard anywhere: the lock matches it with ArnNotLike)."
   }
 }
 

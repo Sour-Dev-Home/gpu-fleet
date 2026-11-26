@@ -45,7 +45,7 @@ resource "google_monitoring_alert_policy" "broker_4xx" {
     condition_threshold {
       # UNVERIFIED filter syntax: written from the metric list (run.googleapis.com/request_count, label
       # response_code_class); validate can't check it, so look at the policy in the console after apply.
-      filter          = "resource.type = \"cloud_run_revision\" AND resource.labels.service_name = \"fleet-broker\" AND metric.type = \"run.googleapis.com/request_count\" AND metric.labels.response_code_class = \"4xx\""
+      filter          = "resource.type = \"cloud_run_revision\" AND resource.labels.service_name = \"fleet-broker\" AND metric.type = \"run.googleapis.com/request_count\" AND metric.labels.response_code_class = \"4xx\" AND metric.labels.response_code != \"429\""
       comparison      = "COMPARISON_GT"
       threshold_value = 5
       duration        = "300s"

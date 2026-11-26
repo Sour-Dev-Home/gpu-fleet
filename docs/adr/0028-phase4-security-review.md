@@ -20,7 +20,8 @@ directory, a default data class on `fleet-enqueue`).
    from Terraform); anything else is logged and acknowledged, never raised. The budget path `/` and the alert path
    accept only their own payload shape. Only the Cloud Monitoring notification service agent may publish, on that
    topic only. A worker with a wrong token polls about once a second, well under the threshold.
-2. **Data-plane lock (Q94).** The results bucket policy denies `s3:GetObject`, `PutObject` and `DeleteObject` on
+2. **Data-plane lock (Q94).** The results bucket policy denies `s3:GetObject`, `PutObject` and `DeleteObject` (written since as the pattern `s3:*Object*`, which also covers the version, ACL
+   and tagging variants; the broker's Allow is GetObject and PutObject, and `ListBucket` has no "Object" in it) on
    `inputs/*` and `results/*` to every principal except the broker role and the admin role
    (`var.admin_principal_arn`, sensitive, from the vault), matched with `ArnNotLike` on `aws:PrincipalArn` (an IAM
    user's user ARN, or a role's ARN, which is also what an assumed-role session reports; the maintainer signs in as
@@ -32,6 +33,20 @@ directory, a default data class on `fleet-enqueue`).
    `fleet-enqueue --data-class` is required. Accepted trade-offs, written in docs/security.md: request logs below 500
    are excluded (privacy over forensics), and the broker's `ListBucket` exposes hashed key names (needed for a
    real 404 on HEAD).
+
+4. **Kill switch hardening.** `/alert` accepts only Cloud Monitoring notification `version` "1.2"; the budget and
+   alert shapes are exclusive (an `incident` makes a budget message invalid, budget fields make an alert invalid);
+   ignore paths log `policy_matches` and `state` cut to 16 characters, never the attacker-chosen text. The flood
+   condition counts 4xx except 429. The admin ARN may contain no `*`, and the bucket module's principal list has
+   no default.
+5. **Replay guard (K4).** An open incident whose `incident.started_at` (epoch seconds) is more than 1 hour old is
+   logged and acknowledged (2xx), so a redelivered old message cannot undo a manual restore of public access. An
+   undatable one (missing, not a number, NaN) is ignored the same way. This is deliberate: acting on a message
+   we cannot date risks the same undo, while ignoring it loses little, because a real flood keeps the policy
+   open and Monitoring re-notifies, and the budget path still backstops cost. The clock is injected for tests.
+6. **Unknown paths return 404.** Known paths always answer 2xx on a bad message (redelivery can't fix it), but a
+   path nothing handles means a misconfigured push endpoint; a 404 makes that loud (Pub/Sub retries, metrics show
+   it) instead of silently acknowledging.
 
 ## Consequences
 - A flood cuts public access in minutes; reset is `terraform apply` as for the budget (README, kill switch section).

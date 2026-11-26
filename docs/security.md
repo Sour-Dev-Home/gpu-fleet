@@ -95,6 +95,12 @@ Out of scope everywhere: an attacker on the maintainer's own PC (they would alre
   credentials). It is needed for a real 404 on HEAD: without it S3 answers 403 for a missing key, which the broker
   must treat as a fault. The names are content hashes under `inputs/` and `results/`, which the role can already
   read for the open classes, and the data-plane lock above keeps anyone else out.
+- **The flood alert trades availability for a hard cost cap.** About 1,500 unauthenticated 4xx requests other
+  than 429 in 5 minutes (5/s sustained) open the incident, the kill switch removes `allUsers` from the broker,
+  and the broker stays offline until a reviewed `terraform apply`. Anyone who can send that many bad requests can
+  therefore take the public broker down. 429 is excluded (Cloud Run's no-free-instance and the broker's rate
+  limit are load shedding, not a flood). Revisit with Cloud Armor or rate limiting at the edge once volunteers
+  depend on the broker (phase 5+).
 
 **Before phase 10 (volunteers):**
 - [ ] Per-worker identity: individual hashed tokens, revocation, and every result recording its worker (ADR 0007).

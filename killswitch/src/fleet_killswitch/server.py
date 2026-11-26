@@ -35,6 +35,10 @@ def make_handler(iam: Iam, service: str, flood_policy: str = "") -> type[BaseHTT
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
             path = self.path.split("?", 1)[0]
+            # Known paths always answer 2xx when the message is bad (redelivery can't fix it). An unknown
+            # path is different: no Pub/Sub subscription we own points there, so it is a misconfigured push
+            # endpoint, and a 404 makes that loud (Pub/Sub retries and the failure shows up in its metrics)
+            # instead of silently acknowledging messages that nothing handles.
             if path not in ("/", "/alert"):
                 log("ERROR", "unknown path, ignored")
                 self._reply(404)
