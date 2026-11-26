@@ -12,6 +12,8 @@
   FLEET_RESULTS_HOST  the results bucket's host, e.g. <bucket>.s3.amazonaws.com (us-east-1) or
                       <bucket>.s3.<region>.amazonaws.com. Required for S3 mode: the worker refuses a
                       presigned URL for any other host (SSRF), and FLEET_ALLOW_HTTP never loosens it.
+  FLEET_WORKER_ID     overrides the install ID (default: a random one kept in the user's config folder,
+                      see identity.py); the OTel service.instance.id of traces and metrics
   FLEET_ALLOW_HTTP    1 to allow plain http to a non-loopback host, e.g. the broker's
                       service name on a private Docker network. Never on a public network.
 
@@ -29,7 +31,7 @@ from typing import Self
 
 import httpx
 
-from . import jsonlog, telemetry
+from . import identity, jsonlog, telemetry
 from .dir_store import DirStore
 from .http_broker import HttpBroker
 from .loop import Runner, Worker
@@ -92,6 +94,11 @@ class Config:
         if self.results_host and not _HOST.match(self.results_host):
             raise SystemExit("fleet-worker: FLEET_RESULTS_HOST must be a bare host name")
 
+    @property
+    def results_mode(self) -> str:
+        """`local`, or `s3 <host>` when FLEET_RESULTS_HOST is set (the bucket's bare host name)."""
+        return f"s3 {self.results_host}" if self.results_host else "local"
+
     def __repr__(self) -> str:  # never print the token, even by accident
         return (
             f"Config(broker_url={self.broker_url!r}, runner={self.runner_name!r}, "
@@ -143,7 +150,7 @@ class _Clients:
         self.close()
 
 
-def build(config: Config) -> tuple[Worker, _Clients]:
+def build(config: Config, metrics: telemetry.Metrics | None = None) -> tuple[Worker, _Clients]:
     client = httpx.Client(
         base_url=config.broker_url,
         headers={"Authorization": f"Bearer {config.token}"},
@@ -159,7 +166,10 @@ def build(config: Config) -> tuple[Worker, _Clients]:
         broker,
         DirStore(config.results_dir),
         runner,
-        url_store=lambda lease: UrlStore(broker, lease, transfers, config.results_host),
+        url_store=lambda lease: UrlStore(
+            broker, lease, transfers, config.results_host, metrics=metrics
+        ),
+        metrics=metrics,
     )
     return worker, _Clients(client, transfers)
 
@@ -167,16 +177,31 @@ def build(config: Config) -> tuple[Worker, _Clients]:
 def main(env: Mapping[str, str] = os.environ) -> int:
     jsonlog.setup()  # one JSON object per line on stdout (ADR 0018)
     config = Config(env)
-    worker, client = build(config)
+    try:
+        instance_id = identity.install_id(env)  # one ID per install, for traces and metrics
+    except ValueError as e:
+        raise SystemExit(f"fleet-worker: {e}") from None
+    # Both are no-ops unless the [otel] extra and OTEL_EXPORTER_OTLP_ENDPOINT are there.
+    metrics, flush_metrics = telemetry.setup_metrics(env, instance_id)
+    worker, client = build(config, metrics)
     stopper = Stopper()
     stopper.install()
-    flush_traces = telemetry.setup(env)  # a no-op unless the [otel] extra and an endpoint are there
-    log.info("worker started: %r", config)
+    flush_traces = telemetry.setup(env, instance_id)
+    # Labels only (ADR 0026, Q85): no token, and no URL with credentials (the broker URL has none
+    # by check; a presigned URL never appears here, only the bucket's host).
+    log.info(
+        "worker started: %r prompt_versions=%s models=%s results=%s",
+        config,
+        ",".join(sorted(worker.runner.prompt_versions)),
+        ",".join(sorted(worker.runner.models)),
+        config.results_mode,
+    )
     try:
         with client:
             worker.run(should_stop=stopper.should_stop, sleep=stopper.sleep)
     finally:
         flush_traces()  # the last job's spans, before the process exits
+        flush_metrics()  # and the last metrics window
     log.info("worker stopped")
     return 0
 

@@ -18,15 +18,16 @@ import uuid
 from collections.abc import Callable, Collection, Iterable, Mapping
 
 from . import jsonlog
+from .claimability import Claimability
 from .store import Claim, Completion, JobStore, QueueStats
 
 log = logging.getLogger("fleet_broker")
 
 # Turnaround bucket edges, in seconds. The SLO threshold (15 minutes, ADR 0018) must be an edge,
 # or "share of jobs done within 900 s" can only be estimated between two edges.
-# Label values of fleet.jobs: 5 x 3 = 15 series, always all reported. Kept equal to the store's
+# Label values of fleet.jobs: 6 x 3 = 18 series, always all reported. Kept equal to the store's
 # states (plus 'expired', see QueueStats) and app.DATA_CLASSES by tests/test_telemetry.py.
-JOB_STATES = ("queued", "leased", "expired", "done", "dead")
+JOB_STATES = ("queued", "leased", "expired", "done", "dead", "cancelled")
 DATA_CLASSES = ("footage", "derived", "open")
 
 TURNAROUND_BUCKETS = (1, 5, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200)
@@ -55,7 +56,12 @@ class Metrics:
 
 
 class OtelMetrics(Metrics):
-    def __init__(self, provider, stats: Callable[[], tuple[float, QueueStats]]) -> None:
+    def __init__(
+        self,
+        provider,
+        stats: Callable[[], tuple[float, QueueStats]],
+        claimability: Claimability | None = None,
+    ) -> None:
         from opentelemetry.metrics import Observation
 
         self.provider = provider
@@ -77,6 +83,22 @@ class OtelMetrics(Metrics):
 
         meter.create_observable_gauge(
             "fleet.jobs", [jobs], unit="{job}", description="Jobs by state and data class"
+        )
+
+        def unclaimable(_options) -> Iterable[Observation]:
+            if claimability is None:
+                return
+            _, s = stats()
+            # Per (model, prompt version) with a waiting job; zeros included (see `jobs` above).
+            # A pair that stops waiting drops out: Prometheus shows its last value up to 5 minutes.
+            for (model, version), n in claimability.unclaimable(s.waiting).items():
+                yield Observation(n, {"model": model, "prompt_version": version})
+
+        meter.create_observable_gauge(
+            "fleet.jobs.unclaimable",
+            [unclaimable],
+            unit="{job}",
+            description="Waiting jobs no lease request in the last 10 minutes could have taken",
         )
         meter.create_observable_gauge(
             "fleet.queue.oldest_age",
@@ -340,10 +362,14 @@ def metrics_endpoint(env: Mapping[str, str]) -> str:
 
 
 def setup(
-    reader_store: JobStore, clock: Callable[[], float], env: Mapping[str, str] = os.environ
+    reader_store: JobStore,
+    clock: Callable[[], float],
+    env: Mapping[str, str] = os.environ,
+    claimability: Claimability | None = None,
 ) -> Metrics:
     """OTLP metrics if configured, else the no-op. `reader_store` serves the queue gauges from
-    the app's pool (a connection only while a query runs)."""
+    the app's pool (a connection only while a query runs). `claimability` must be the object the
+    app records lease requests into (create_app), or fleet.jobs.unclaimable has nothing to read."""
     if env.get("OTEL_SDK_DISABLED", "").strip().lower() == "true":
         return Metrics()
     if not env.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
@@ -376,4 +402,4 @@ def setup(
         now = clock()
         return now, reader_store.stats(now)
 
-    return OtelMetrics(provider, stats)
+    return OtelMetrics(provider, stats, claimability)

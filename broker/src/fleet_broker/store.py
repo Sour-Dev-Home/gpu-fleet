@@ -14,8 +14,8 @@ statements and gives it back.
 import hashlib
 import secrets
 from collections.abc import Collection
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
 import psycopg
 from psycopg import Connection
@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     model            TEXT NOT NULL,
     prompt_version   TEXT NOT NULL,
     state            TEXT NOT NULL DEFAULT 'queued'
-                     CHECK (state IN ('queued', 'leased', 'done', 'dead')),
+                     CHECK (state IN ('queued', 'leased', 'done', 'dead', 'cancelled')),
     attempts         INTEGER NOT NULL DEFAULT 0,  -- how many times the job was leased
     lease_token      TEXT,                        -- sha256 of the lease token, set while leased
     lease_expires_at DOUBLE PRECISION,            -- broker wall clock, set while leased
@@ -213,6 +213,9 @@ class QueueStats:
     # re-leased (lazy expiry keeps such rows in 'leased' until the next claim).
     counts: dict[tuple[str, str], int]
     oldest_available_enqueued_at: float | None  # None: nothing available, or only pre-ADR-0018 rows
+    # (model, prompt_version, data_class) -> jobs a worker could take now: queued, or leased with
+    # a lease that ran out and attempts to spare. Feeds fleet.jobs.unclaimable (ADR 0026).
+    waiting: dict[tuple[str, str, str], int] = field(default_factory=dict)
 
 
 def result_key_for(job: dict[str, Any]) -> str:
@@ -248,8 +251,27 @@ class JobStore:
             for name, sql_type in MIGRATIONS:
                 # name and type come from the constant above, never from input
                 conn.execute(f"ALTER TABLE jobs ADD COLUMN IF NOT EXISTS {name} {sql_type}")
+            self._widen_state_check(conn)
             for index in INDEXES:
                 conn.execute(index)
+
+    @staticmethod
+    def _widen_state_check(conn: Connection) -> None:
+        """A table made before 'cancelled' (ADR 0026) has the old CHECK on `state`, and CREATE
+        TABLE IF NOT EXISTS leaves it alone. Replace it once; later starts find the new one and
+        skip, so they don't take the ACCESS EXCLUSIVE lock and re-scan the table. Widening only:
+        old code (a rolling deploy runs both) never writes the new state, so it is unaffected."""
+        row = conn.execute(
+            "SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint"
+            " WHERE conrelid = 'jobs'::regclass AND conname = 'jobs_state_check'"
+        ).fetchone()
+        if row is not None and "'cancelled'" in row["def"]:
+            return
+        conn.execute("ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_state_check")
+        conn.execute(
+            "ALTER TABLE jobs ADD CONSTRAINT jobs_state_check"
+            " CHECK (state IN ('queued', 'leased', 'done', 'dead', 'cancelled'))"
+        )
 
     def add(
         self,
@@ -426,6 +448,26 @@ class JobStore:
             ).fetchone()
         return None if row is None else Completion(**row, first=False)
 
+    def cancel(self, job_id: str) -> Literal["cancelled", "already", "finished"] | None:
+        """Stop a queued or leased job for good (ADR 0026): it is never leased again, and the
+        lease holder's heartbeat and completion find no leased row (the usual 409, ADR 0007).
+
+        "cancelled": it was stopped now. "already": it was cancelled before (so repeating is
+        harmless). "finished": it is done or dead, which cancelling cannot undo. None: no such job.
+        One conditional UPDATE, so a completion racing the cancel has exactly one winner."""
+        with self.pool.connection() as conn:
+            row = conn.execute(
+                "UPDATE jobs SET state = 'cancelled'"
+                " WHERE job_id = %s AND state IN ('queued', 'leased') RETURNING job_id",
+                (job_id,),
+            ).fetchone()
+            if row is not None:
+                return "cancelled"
+            row = conn.execute("SELECT state FROM jobs WHERE job_id = %s", (job_id,)).fetchone()
+        if row is None:
+            return None
+        return "already" if row["state"] == "cancelled" else "finished"
+
     def stats(self, now: float) -> QueueStats:
         """Counts by state and data class, and when the oldest available job was enqueued.
 
@@ -443,5 +485,15 @@ class JobStore:
                 " WHERE state = 'queued' OR (state = 'leased' AND lease_expires_at <= %s)",
                 (now,),
             ).fetchone()
+            # Same "available" test as the claim; only open rows, so the partial index serves it.
+            waiting_rows = conn.execute(
+                "SELECT model, prompt_version, COALESCE(data_class, 'footage') AS data_class,"
+                " COUNT(*) AS n FROM jobs"
+                " WHERE state IN ('queued', 'leased')"
+                " AND (state = 'queued' OR (lease_expires_at <= %s AND attempts < %s))"
+                " GROUP BY 1, 2, 3",
+                (now, self.max_attempts),
+            ).fetchall()
         counts = {(row["state"], row["data_class"]): row["n"] for row in rows}
-        return QueueStats(counts, oldest["oldest"])
+        waiting = {(r["model"], r["prompt_version"], r["data_class"]): r["n"] for r in waiting_rows}
+        return QueueStats(counts, oldest["oldest"], waiting)

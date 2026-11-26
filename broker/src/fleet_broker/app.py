@@ -1,4 +1,4 @@
-"""The broker's HTTP API: lease, heartbeat, complete (workers) and add jobs (admin).
+"""The broker's HTTP API: lease, heartbeat, complete (workers) and add or cancel jobs (admin).
 
 Status codes carry the store's answers (ADR 0007):
 - 200 with a body: done.
@@ -24,7 +24,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Literal, get_args
 
 import psycopg
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Request, Response
 from fastapi.responses import JSONResponse
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, ConfigDict, Field
@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from . import jsonlog, s3, telemetry
 from .auth import bearer_matches
 from .bodylimit import BodyLimit
+from .claimability import Claimability
 from .ratelimit import TokenBucket, retry_after
 from .s3 import ResultBucket
 from .store import (
@@ -51,7 +52,8 @@ MAX_BODY_BYTES = 16 * 1024  # every request here is a few hundred bytes of JSON
 
 Sha256Hex = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 # Covers Ollama tags ("llama3.1:8b-instruct-q4_K_M"), registry paths and digest pins ("m@sha256:...")
-Name = Annotated[str, Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._:/+@-]+$")]
+NAME = r"^[A-Za-z0-9._:/+@-]+$"
+Name = Annotated[str, Field(min_length=1, max_length=200, pattern=NAME)]
 Token = Annotated[str, Field(min_length=1, max_length=128)]
 
 
@@ -181,6 +183,7 @@ def create_app(
     worker_burst: int = 100,
     bucket: ResultBucket | None = None,
     max_result_bytes: int = s3.DEFAULT_MAX_RESULT_BYTES,
+    claimability: Claimability | None = None,
 ) -> FastAPI:
     """`database`: the PostgreSQL URL, or an open pool made by store.make_pool. The app owns the
     pool either way: its lifespan closes it, so shutdown (SIGTERM) releases the connections.
@@ -192,12 +195,15 @@ def create_app(
     hot loop's.
     `bucket`: the results bucket (S3 mode, ADR 0025): leases carry presigned URLs, /upload-url
     exists, and /complete checks the stored object. None is local mode, exactly as before.
-    `max_result_bytes`: the largest result /upload-url will sign for."""
+    `max_result_bytes`: the largest result /upload-url will sign for.
+    `claimability`: remembers what lease requests declared, for fleet.jobs.unclaimable; pass the
+    same object to telemetry.setup so the gauge reads what /lease records (ADR 0026)."""
     worker_tokens, admin_tokens = _token_sets(
         worker_token, admin_token, previous_worker_token, previous_admin_token
     )
     clearance = frozenset(clearance)
     metrics = metrics or Metrics()
+    claimability = claimability or Claimability(clock, clearance)
     if not clearance or not clearance <= DATA_CLASSES:
         raise ValueError(
             f"worker clearance must be a non-empty subset of {sorted(DATA_CLASSES)}, "
@@ -315,10 +321,33 @@ def create_app(
             now=clock(),
         )
 
+    @app.post("/jobs/{job_id}/cancel", dependencies=admin)
+    def cancel_job(
+        job_id: Annotated[str, Path(min_length=1, max_length=200, pattern=NAME)], s: Store
+    ):
+        """200 {"job_id", "state": "cancelled"}, also when it already was (idempotent: the same
+        answer, so a retry after a lost response needs no special case). 409 job_finished for a
+        done or dead job, 404 job_not_found (ADR 0026). A worker holding its lease gets the usual
+        409 "lease lost" (ADR 0007) on its next heartbeat or completion."""
+        outcome = s.cancel(job_id)
+        if outcome is None:
+            return JSONResponse(
+                status_code=404, content={"detail": "no such job", "code": "job_not_found"}
+            )
+        if outcome == "finished":
+            return JSONResponse(
+                status_code=409,
+                content={"detail": "the job is already done or dead", "code": "job_finished"},
+            )
+        return {"job_id": job_id, "state": "cancelled"}
+
     # response_model=None: one declared model would cut the S3 lease's extra fields; both are
     # built as models (validated) and sent as their dicts.
     @app.post("/lease", response_model=None, dependencies=worker)
     def lease(want: LeaseIn, s: Store):
+        # First, before anything can fail: even a request answered 204 or 503 shows a worker is
+        # there and what it runs (fleet.jobs.unclaimable). Only requests that passed the token.
+        claimability.record(want.models, want.capabilities)
         if bucket is not None:
             # Before the claim, which counts an attempt: an STS or metadata outage must not
             # walk every job toward the dead-letter limit.
@@ -515,6 +544,7 @@ def _from_env() -> FastAPI | None:
 
         return stop
 
+    claimability = Claimability(time.time, clearance)  # shared: /lease records, the gauge reads
     try:
         return create_app(
             pool,
@@ -524,7 +554,10 @@ def _from_env() -> FastAPI | None:
             docs=os.environ.get("FLEET_DOCS") == "1",
             # The metrics thread reads the gauges through the app's own pool (the schema is made
             # by create_app before the first export).
-            metrics=telemetry.setup(JobStore(pool, migrate=False), time.time),
+            metrics=telemetry.setup(
+                JobStore(pool, migrate=False), time.time, claimability=claimability
+            ),
+            claimability=claimability,
             tracing=tracing,
             previous_worker_token=previous_worker,
             previous_admin_token=previous_admin,

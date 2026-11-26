@@ -104,6 +104,20 @@ def test_queue_gauges_read_the_database(db_url):
     assert age.value == 20  # "b" has waited 20 s; the running "a" doesn't count
 
 
+def test_cancelled_jobs_are_counted_and_no_longer_wait(db_url):
+    client, clock, reader = rig(db_url)
+    add(client, "a")
+    r = client.post("/jobs/a/cancel", headers={"Authorization": f"Bearer {ADMIN}"})
+    assert r.status_code == 200
+    clock.now += 50
+    p = points(reader)
+    jobs = {(d.attributes["state"], d.attributes["data_class"]): d.value for d in p["fleet.jobs"]}
+    assert jobs[("cancelled", "open")] == 1
+    assert jobs[("queued", "open")] == 0
+    (age,) = p["fleet.queue.oldest_age"]
+    assert age.value == 0  # a cancelled job is not waiting
+
+
 def test_completion_counts_once_and_records_turnaround(db_url):
     client, clock, reader = rig(db_url)
     add(client, "a")
@@ -136,7 +150,7 @@ def test_gauge_labels_cover_every_state_and_data_class():
     from fleet_broker import app, store
 
     assert set(telemetry.DATA_CLASSES) == set(app.DATA_CLASSES)
-    for state in ("queued", "leased", "done", "dead"):  # the CHECK constraint's states
+    for state in ("queued", "leased", "done", "dead", "cancelled"):  # the CHECK constraint's states
         assert f"'{state}'" in store.SCHEMA and state in telemetry.JOB_STATES
 
 

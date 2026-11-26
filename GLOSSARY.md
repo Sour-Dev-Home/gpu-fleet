@@ -48,6 +48,12 @@ _Avoid_: Server, queue, coordinator
 A **Worker**'s time-limited right to run one **Job**, proven by its lease token.
 _Avoid_: Lock, claim, reservation
 
+**Cancelled**:
+The state of a **Job** the maintainer stopped with `POST /jobs/{job_id}/cancel` while it was queued or leased. It
+is never leased again, and its **Lease** holder's heartbeat and completion are refused like any lost lease. Final;
+a done or dead job cannot be cancelled. The other states are queued, leased, done and dead.
+_Avoid_: Deleted, aborted, killed
+
 ### Execution
 
 **Worker**:

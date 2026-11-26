@@ -16,6 +16,7 @@ TELEMETRY = (ROOT / "broker" / "src" / "fleet_broker" / "telemetry.py").read_tex
 # OTel name -> the names Prometheus stores it under (dots become _, units and _total are added).
 PROMETHEUS_NAMES = {
     "fleet.jobs": {"fleet_jobs"},
+    "fleet.jobs.unclaimable": {"fleet_jobs_unclaimable"},
     "fleet.queue.oldest_age": {"fleet_queue_oldest_age_seconds"},
     "fleet.leases.reissued": {"fleet_leases_reissued_total"},
     "fleet.jobs.completed": {"fleet_jobs_completed_total"},
@@ -28,7 +29,7 @@ PROMETHEUS_NAMES = {
         "fleet_job_turnaround_seconds_sum",
     },
 }
-GAUGES = ("fleet_jobs", "fleet_queue_oldest_age_seconds")
+GAUGES = ("fleet_jobs", "fleet_jobs_unclaimable", "fleet_queue_oldest_age_seconds")
 DATASOURCES = {"prometheus", "tempo", "loki"}  # the uids otel-lgtm provisions
 
 
@@ -79,16 +80,31 @@ def test_panels_use_the_provisioned_datasources_and_unique_ids():
         assert uid in DATASOURCES | {"__expr__"}
 
 
-def test_the_two_alerts_and_their_thresholds():
+def test_the_alerts_and_their_thresholds():
     assert re.findall(r"^\s*- uid: (\S+)", ALERTS, flags=re.MULTILINE) == [
         "fleet-dead-letters",
         "fleet-queue-stuck",
+        "fleet-jobs-unclaimable",
     ]
     assert re.search(r'fleet_jobs\{state="dead"\}.*\n(.*\n)*?.*params: \[0\]', ALERTS)
     assert re.search(r"oldest_age_seconds.*\n(.*\n)*?.*params: \[600\]", ALERTS)
     # The age gauge reports 0 for an empty queue: missing data means the broker went quiet.
     stuck = ALERTS.split("uid: fleet-queue-stuck")[1]
-    assert "noDataState: Alerting" in stuck
+    assert "noDataState: Alerting" in stuck.split("uid: fleet-jobs-unclaimable")[0]
+    # Unclaimable: any job (> 0), for ten minutes, read as max across broker instances. No data
+    # means nothing is waiting, so it must not fire.
+    unclaimable = ALERTS.split("uid: fleet-jobs-unclaimable")[1]
+    assert "max by (model, prompt_version) (fleet_jobs_unclaimable)" in unclaimable
+    assert re.search(r"params: \[0\]", unclaimable)
+    assert re.search(r"^\s*for: 10m$", unclaimable, flags=re.MULTILINE)
+    assert "noDataState: OK" in unclaimable
+
+
+def test_the_dashboard_shows_the_unclaimable_jobs_by_model_and_prompt_version():
+    panel = next(p for p in DASHBOARD["panels"] if p["title"].startswith("Unclaimable jobs"))
+    assert panel["targets"][0]["expr"].startswith(
+        "max by (model, prompt_version) (fleet_jobs_unclaimable)"
+    )
 
 
 def test_compose_mounts_the_provisioning_read_only():

@@ -1,4 +1,4 @@
-# Two alerts on symptoms, not causes (ADR 0018). Loaded at startup by compose.obs.yaml.
+# Alerts on symptoms (ADR 0018), plus one on a cause that is common and cheap to see (ADR 0026). Loaded at startup by compose.obs.yaml.
 # No contact point yet: they show under Alerting -> Alert rules. Notifications come in phase 4.
 #
 # Gauges come from every broker instance that reported recently (a restarted broker leaves the old
@@ -73,3 +73,36 @@ groups:
         annotations:
           summary: "The oldest queued job has waited {{ humanizeDuration $values.A.Value }}"
           description: Check that a worker is running with this job's prompt version, model and clearance.
+
+      - uid: fleet-jobs-unclaimable
+        title: Queued jobs nobody has asked for
+        # Cause, where the alert above shows the symptom: the broker remembers what each lease request
+        # declared for 10 minutes (ADR 0026). A queued job whose model and prompt version no request
+        # named, or whose data class is outside the broker's clearance, can't be leased by anyone.
+        # The gauge has one series per waiting (model, prompt version): zeros included, so a fixed
+        # pair reads 0. The broker keeps this in memory (one instance, ADR 0026): after a restart it
+        # can read high until workers poll again, which the 10 minutes of `for` absorb.
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: sum(max by (model, prompt_version) (fleet_jobs_unclaimable))
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        for: 10m
+        noDataState: OK # no data: nothing is waiting (or the broker is silent, and the alert above says so)
+        execErrState: Error
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $values.A }} queued job(s) no worker has asked for"
+          description: See the Unclaimable jobs panel for the model and prompt version; start a worker that runs them, or cancel the jobs.
