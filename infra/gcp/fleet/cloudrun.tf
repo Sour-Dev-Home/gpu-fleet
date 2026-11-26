@@ -1,5 +1,28 @@
 # The broker on Cloud Run (ADR 0021). Created only once an image exists: the first apply leaves broker_image
 # null, so the registry exists to push to before the service is asked to pull from it.
+# The AWS stack's outputs (infra/aws/fleet), read from the same state bucket as this stack's backend
+# (versions.tf). Skipped when s3_mode is false, so a rollback does not need the AWS state.
+data "terraform_remote_state" "aws" {
+  count   = var.s3_mode ? 1 : 0
+  backend = "s3"
+
+  config = {
+    bucket = "fleet-tfstate-190d94"
+    key    = "aws/fleet/terraform.tfstate"
+    region = "us-east-1"
+  }
+}
+
+locals {
+  # Set together or not at all: the broker treats a partial set as a startup error.
+  s3_env = var.s3_mode ? {
+    FLEET_RESULTS_BUCKET = data.terraform_remote_state.aws[0].outputs.results_bucket
+    FLEET_AWS_ROLE_ARN   = data.terraform_remote_state.aws[0].outputs.broker_role_arn
+    FLEET_AWS_AUDIENCE   = var.aws_federation_audience
+    AWS_REGION           = "us-east-1"
+  } : {}
+}
+
 resource "google_cloud_run_v2_service" "broker" {
   count = var.broker_image == null ? 0 : 1
 
@@ -71,6 +94,15 @@ resource "google_cloud_run_v2_service" "broker" {
             secret  = google_secret_manager_secret.token["fleet-admin-token"].secret_id
             version = "latest"
           }
+        }
+      }
+
+      # S3 mode (ADR 0025): all four together or none. The bucket and role come from the AWS stack's state.
+      dynamic "env" {
+        for_each = local.s3_env
+        content {
+          name  = env.key
+          value = env.value
         }
       }
 
@@ -177,7 +209,11 @@ check "broker_is_public" {
   }
 
   assert {
-    condition     = strcontains(data.google_cloud_run_v2_service_iam_policy.broker.policy_data, "allUsers")
+    # Parsed, not searched: "allUsers" must be a member of the roles/run.invoker binding itself.
+    condition = anytrue([
+      for b in try(jsondecode(data.google_cloud_run_v2_service_iam_policy.broker.policy_data).bindings, []) :
+      b.role == "roles/run.invoker" && contains(try(b.members, []), "allUsers")
+    ])
     error_message = "The broker is not public: the budget kill switch has probably fired (ADR 0024). Investigate before applying: apply restores public access."
   }
 }

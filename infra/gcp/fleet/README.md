@@ -245,6 +245,40 @@ tf apply                       # restores it; the broker answers 404 JSON on /no
 This proves the push, the OIDC token and the IAM edit, not that Cloud Billing can publish to the topic: only a real
 notification does (the budget's topic subscription shows deliveries in the console).
 
+**After the apply that makes the kill switch's ingress internal-only, re-run the drill** (above): Pub/Sub push to an
+internal-only service in the same project is documented as allowed but UNVERIFIED here. If the push is refused,
+revert `ingress` to `INGRESS_TRAFFIC_ALL` (the invoker binding is still the gate).
+
+## S3 mode (ADR 0025)
+
+The broker leases presigned S3 URLs and signs them with AWS credentials from workload identity federation
+(no stored key). The four settings (`FLEET_RESULTS_BUCKET`, `FLEET_AWS_ROLE_ARN`, `FLEET_AWS_AUDIENCE`,
+`AWS_REGION`) are set together from `s3_mode` (default true); the bucket and role are read from the AWS stack's
+remote state, so this stack needs the AWS login too. The audience is `aws_federation_audience` and must equal the
+AWS stack's `federation_audience` (a test compares the defaults).
+
+**Apply order**
+1. The AWS stack first (`infra/aws/fleet`; done).
+2. Build and push a new broker image from `main` (steps 7: it now includes boto3), and note its digest.
+3. This stack: `$env:TF_VAR_broker_image = "$repo/broker@sha256:<digest>"`, then `tf plan` / `tf apply` as in step 8.
+
+**First-federation check** (broker logs: `gcloud run services logs read fleet-broker --region us-central1`)
+- A revision that starts is a good sign (partial config is a startup error), but credentials are fetched lazily.
+- Enqueue an open job and lease it with the worker token: the response must carry `input_url`, an https URL on
+  the bucket's host.
+- A failure shows as `AccessDenied` on `AssumeRoleWithWebIdentity` in the logs and a 5xx on `/lease`: the role's
+  trust policy disagrees with the token (audience, or the service account's unique ID). Check the audience first.
+
+**Rollback**: `tf apply -var s3_mode=false` removes all four settings together (and skips the AWS state read). The
+broker is back to its previous mode; workers must not set `FLEET_RESULTS_HOST` against it.
+
+**Workers** need `FLEET_RESULTS_HOST` = the bucket's virtual-hosted host, `<bucket>.s3.amazonaws.com` in us-east-1:
+
+```powershell
+$bucket = terraform -chdir=infra/aws/fleet output -raw results_bucket
+$env:FLEET_RESULTS_HOST = "$bucket.s3.amazonaws.com"
+```
+
 ## 10. Teardown
 
 Deletion protection is on at three levels. Set `deletion_protection = false` on the instance AND

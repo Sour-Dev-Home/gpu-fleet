@@ -108,6 +108,18 @@ variable "alert_email" {
   }
 }
 
+variable "s3_mode" {
+  description = "Presigned S3 URLs and AWS federation for the broker (ADR 0025). False removes all four S3 settings together: a rollback without a code change."
+  type        = bool
+  default     = true
+}
+
+variable "aws_federation_audience" {
+  description = "The audience of the broker's Google ID token for AWS. Must equal federation_audience in infra/aws/fleet (a test compares the defaults). Not a secret."
+  type        = string
+  default     = "fleet-aws-federation"
+}
+
 variable "rotation_in_progress" {
   description = <<-EOT
     True only while rotating the broker's tokens: passes the two "-previous" secrets (which always exist, empty)
