@@ -39,9 +39,10 @@ Out of scope everywhere: an attacker on the maintainer's own PC (they would alre
 - [x] Body limit for chunked requests: counted as the body arrives (`bodylimit.py`), 413 past 16 KiB.
       In the app rather than Cloud Armor, which needs a load balancer (about $18/month,
       docs/research/phase-4.md). Q46, 2026-11-25.
-- [ ] A Cloud Run max-instances cap (phase 4 step 4): the bucket is per instance, so the cap bounds the
+- [x] A Cloud Run max-instances cap (phase 4 step 4): the bucket is per instance, so the cap bounds the
       fleet-wide rate and the compute. It does not bound the bill: unauthenticated requests are still
-      billed per request (see the open item below).
+      billed per request (see the open item below). In code: `max_instances` (default 3) in `infra/gcp/fleet`,
+      checked by a test; not yet applied (ADR 0021).
 - [ ] Unauthenticated request cost: Cloud Run bills every request that reaches the service, including
       the ones the app answers 401 or 429. Max instances bounds throughput and compute only. Decide on a
       budget alert with a kill switch, or a front layer that sheds junk before it is billed.
