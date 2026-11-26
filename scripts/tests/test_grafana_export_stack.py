@@ -99,7 +99,10 @@ def test_the_scheduler_job_is_every_minute_a_post_with_a_short_deadline_and_no_r
     assert 'schedule         = "* * * * *"' in b
     assert "region           = var.region" in b and "var.region" in b
     assert 'attempt_deadline = "30s"' in b
-    assert re.search(r"retry_count\s*=\s*0\b", b)
+    # No retries is the API default (retry_count 0). Stating it makes a perpetual plan diff, because the API
+    # omits a default-only retryConfig and the provider reads it back as absent; so no block, and no retries.
+    assert "retry_config" not in b
+    assert not re.search(r"retry_count\s*=\s*[1-9]", b)
     assert 'http_method = "POST"' in b
     assert '/telemetry/flush"' in b
     assert "count = local.flush_enabled ? 1 : 0" in b

@@ -163,10 +163,9 @@ resource "google_cloud_scheduler_job" "telemetry_flush" {
   time_zone        = "Etc/UTC"
   attempt_deadline = "30s"
 
-  # A missed minute is covered by the next one, and a retry would stack a second flush on the first.
-  retry_config {
-    retry_count = 0
-  }
+  # No retries, on purpose: a missed minute is covered by the next one, and a retry would stack a second flush
+  # on the first. That is the API default (retry_count 0), so there is no retry_config block: stating it gives a
+  # perpetual plan diff, since the API omits a default-only retryConfig and the provider reads it back as absent.
 
   http_target {
     http_method = "POST"
